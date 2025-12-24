@@ -66,6 +66,18 @@ export async function initDb(log) {
         created_at INTEGER NOT NULL
       );
     `);
+// -----------------------------
+// Session exercises (Phase B-1)
+// -----------------------------
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS session_exercises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    exercise_name TEXT NOT NULL,
+    notes TEXT,
+    created_at INTEGER NOT NULL
+  );
+`);
 
     if (typeof log === "function") log("✅ initDb OK");
     return db;
