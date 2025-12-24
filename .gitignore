@@ -16,3 +16,6 @@ android/app/build/
 # logs
 npm-debug.log*
 
+# Android Studio / IntelliJ
+android/.idea/
+*.iml

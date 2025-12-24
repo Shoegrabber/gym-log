@@ -11,7 +11,11 @@ import {
   deleteSession,
   seedExercisesFromCsv,
   listExercises,
+addExerciseToSession,
+listSessionExercises,
 } from "./db.js";
+
+let selectedSessionId = null;
 
 const logEl = document.getElementById("log");
 
@@ -98,12 +102,13 @@ async function refreshSessionsList() {
 
     sessionsEl.appendChild(div);
 
-    div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", async () => {
-      await setActiveSessionId(s.id);
-      const detail = await getSessionDetail(s.id);
-      setSelectedSessionUI(detail);
-      logLine(`✅ Opened session id=${s.id}`);
-    });
+div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", async () => {
+  await setActiveSessionId(s.id);
+  selectedSessionId = s.id;                 // ✅ ADD THIS LINE
+  const detail = await getSessionDetail(s.id);
+  setSelectedSessionUI(detail);
+  logLine(`✅ Opened session id=${s.id}`);
+});
 
     div.querySelector(`[data-delete="${s.id}"]`).addEventListener("click", async () => {
       await deleteSession(s.id, logLine);
@@ -111,6 +116,7 @@ async function refreshSessionsList() {
       const activeId = await getActiveSessionId();
       if (String(activeId) === String(s.id)) {
         await clearActiveSessionId();
+selectedSessionId = null; 
         setSelectedSessionUI(null);
       }
       await refreshSessionsList();
@@ -118,6 +124,32 @@ async function refreshSessionsList() {
   }
 
   logLine(`✅ Refreshed sessions (${sessions.length})`);
+}
+
+async function renderSelectedSessionExercises(sessionId) {
+  const container = document.getElementById("exercises");
+  if (!container) return;
+
+  if (!sessionId) {
+    container.innerHTML = "";
+    return;
+  }
+
+  const rows = await listSessionExercises(sessionId);
+
+  if (!rows.length) {
+    container.innerHTML = `<div style="color:#777;">No exercises added yet.</div>`;
+    return;
+  }
+
+  container.innerHTML = rows
+    .map(r => {
+      const note = r.notes ? ` <span style="color:#777;">— ${r.notes}</span>` : "";
+      return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
+        <strong>${r.exercise_name}</strong>${note}
+      </div>`;
+    })
+    .join("");
 }
 
 async function safeStart() {
@@ -155,9 +187,11 @@ createBtn?.addEventListener("click", async () => {
     logLine("🟦 Create clicked:", { date, focus, notes });
 
     const id = await createSession({ date, focus, notes });
+selectedSessionId = id;
     const detail = await getSessionDetail(id);
 
     setSelectedSessionUI(detail);
+await renderSelectedSessionExercises(selectedSessionId);
     await refreshSessionsList();
   } catch (e) {
     logLine("❌ Create session failed:", String(e));
@@ -175,7 +209,9 @@ createBtn?.addEventListener("click", async () => {
         await finishSession(activeId, logLine);
         const detail = await getSessionDetail(activeId);
         setSelectedSessionUI(detail);
-        await refreshSessionsList();
+selectedSessionId = null;
+await renderSelectedSessionExercises(null);       
+ await refreshSessionsList();
       } catch (e) {
         logLine("❌ Finish session failed:", String(e));
         if (e?.stack) logLine(e.stack);
@@ -192,11 +228,15 @@ createBtn?.addEventListener("click", async () => {
 
     // Load active session (if any)
     const activeId = await getActiveSessionId();
-    if (activeId) {
+
+ if (activeId) {
+selectedSessionId = activeId;
       const detail = await getSessionDetail(activeId);
       setSelectedSessionUI(detail);
+await renderSelectedSessionExercises(selectedSessionId);
       logLine(`✅ Loaded active session id=${activeId}`);
     } else {
+selectedSessionId = null;
       setSelectedSessionUI(null);
       logLine("ℹ️ No active session set.");
     }
@@ -260,6 +300,37 @@ const listDiv = document.getElementById("exercise-picker-list");
 } catch (e) {
   logLine("⚠️ Exercise picker failed (non-fatal):", String(e));
 }
+
+// ---------------------------
+// Add exercise to session (Phase B-5)
+// ---------------------------
+const addBtn = document.getElementById("btn-add-exercise");
+const exerciseNameInput = document.getElementById("exercise-name");
+const exerciseNotesInput = document.getElementById("exercise-notes");
+
+addBtn?.addEventListener("click", async () => {
+  if (!selectedSessionId) {
+    logLine("⚠️ No active session");
+    return;
+  }
+
+const name = exerciseNameInput.value.trim();
+  if (!name) return;
+
+  await addExerciseToSession(
+    selectedSessionId,
+    name,
+    exerciseNotesInput?.value || null
+  );
+
+await renderSelectedSessionExercises(selectedSessionId);
+
+exerciseNameInput.value = "";
+if (exerciseNotesInput) exerciseNotesInput.value = "";
+
+  await window.renderSessionExercises?.();
+  logLine("🟦 Exercise added:", name);
+});
   } catch (e) {
     logLine("❌ safeStart crashed:", String(e));
     if (e?.stack) logLine(e.stack);

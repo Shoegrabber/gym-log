@@ -204,11 +204,10 @@ export async function createSession({ date, focus, notes }) {
     [safeDate, safeFocus, notes ?? null, now]
   );
 
-  // Capacitor SQLite sometimes returns lastId differently depending on platform/build
   let sessionId = res?.changes?.lastId;
 
   if (!sessionId) {
-    const q = await db.query(`SELECT last_insert_rowid() AS id;`);
+    const q = await db.query(`SELECT last_insert_rowid() AS id`);
     sessionId = q?.values?.[0]?.id;
   }
 
@@ -219,6 +218,7 @@ export async function createSession({ date, focus, notes }) {
   await setActiveSessionId(sessionId);
   return sessionId;
 }
+
 
 export async function listSessions(limit = 20) {
   await initDb();
@@ -242,11 +242,33 @@ export async function finishSession(sessionId, log) {
     `UPDATE sessions SET status='finished', finished_at=? WHERE id=?`,
     [now, sessionId]
   );
+
   const activeId = await getActiveSessionId();
   if (String(activeId) === String(sessionId)) {
     await clearActiveSessionId();
   }
   if (typeof log === "function") log(`✅ finishSession OK (id=${sessionId})`);
+}
+
+export async function addExerciseToSession(sessionId, exerciseName, notes = null) {
+  await initDb();
+  const now = Date.now();
+  await db.run(
+    `INSERT INTO session_exercises (session_id, exercise_name, notes, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [sessionId, String(exerciseName).trim(), notes ? String(notes).trim() : null, now]
+  );
+}
+
+export async function listSessionExercises(sessionId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT * FROM session_exercises
+     WHERE session_id = ?
+     ORDER BY created_at DESC`,
+    [sessionId]
+  );
+  return res.values ?? [];
 }
 
 export async function deleteSession(sessionId, log) {
