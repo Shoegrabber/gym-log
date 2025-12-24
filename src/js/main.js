@@ -211,6 +211,55 @@ createBtn?.addEventListener("click", async () => {
     }
 
     logLine("✅ Ready.");
+// -----------------------------
+// Exercise picker (tap-to-fill)
+// -----------------------------
+try {
+  const exerciseInput = document.getElementById("exercise-name");
+const searchInput = document.getElementById("exercise-picker-search");
+const listDiv = document.getElementById("exercise-picker-list");
+
+  if (!exerciseInput || !searchInput || !listDiv) {
+    logLine("⚠️ Exercise picker elements not found; skipping picker UI");
+  } else {
+    const allExercises = await listExercises(1000);
+
+    const render = (qRaw = "") => {
+      const q = String(qRaw).trim().toLowerCase();
+      const filtered = q
+        ? allExercises.filter(e => e.name.toLowerCase().includes(q))
+        : allExercises;
+
+      // keep rendering lightweight
+      const show = filtered.slice(0, 120);
+
+      listDiv.innerHTML = show
+        .map(e => `
+          <button type="button"
+            data-name="${e.name.replace(/"/g, "&quot;")}"
+            style="display:block;width:100%;text-align:left;padding:10px;border:0;border-bottom:1px solid #eee;background:white;cursor:pointer;">
+            ${e.name}
+          </button>
+        `)
+        .join("");
+
+      // click-to-fill
+      listDiv.querySelectorAll("button[data-name]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const name = btn.getAttribute("data-name");
+          exerciseInput.value = name;
+          logLine("🟦 picked exercise:", name);
+        });
+      });
+    };
+
+    searchInput.addEventListener("input", () => render(searchInput.value));
+    render("");
+    logLine(`✅ Exercise picker ready (${allExercises.length} exercises)`);
+  }
+} catch (e) {
+  logLine("⚠️ Exercise picker failed (non-fatal):", String(e));
+}
   } catch (e) {
     logLine("❌ safeStart crashed:", String(e));
     if (e?.stack) logLine(e.stack);
