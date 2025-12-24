@@ -1,0 +1,50 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.13.2'
+        classpath 'com.google.gms:google-services:4.4.4'
+    }
+}
+
+apply from: "variables.gradle"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+/**
+ * Force Java 17 for ALL modules, including those pulled from node_modules
+ * (capacitor-android, camera, splash-screen, etc.)
+ *
+ * IMPORTANT: Do NOT set JavaCompile --release for Android builds.
+ */
+subprojects { proj ->
+    afterEvaluate {
+        if (proj.hasProperty("android")) {
+            proj.android {
+                compileOptions {
+                    sourceCompatibility JavaVersion.VERSION_17
+                    targetCompatibility JavaVersion.VERSION_17
+                }
+            }
+        }
+
+        // Only set source/target (NOT --release) to keep AGP happy
+        proj.tasks.withType(JavaCompile).configureEach {
+            sourceCompatibility = "17"
+            targetCompatibility = "17"
+        }
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}

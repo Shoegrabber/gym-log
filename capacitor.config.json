@@ -1,0 +1,12 @@
+{
+  "appId": "com.ben.gymlog",
+  "appName": "Gym Log",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 0,
+      "showSpinner": false
+    }
+  }
+}

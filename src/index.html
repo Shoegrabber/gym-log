@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gym Log</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; max-width: 520px; }
+      h1 { margin: 0 0 8px; font-size: 40px; }
+      .sub { margin: 0 0 16px; color: #666; }
+      .section { border: 1px solid #e5e5e5; border-radius: 12px; padding: 12px; margin: 14px 0; }
+      .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+      input, select, button { font-size: 18px; padding: 10px; border-radius: 8px; border: 1px solid #ccc; }
+      button { cursor: pointer; }
+      .card { border: 1px solid #eee; border-radius: 12px; padding: 12px; margin: 10px 0; background: #fff; }
+      .muted { color: #777; font-size: 14px; }
+      .linkbtn { background: #eef2ff; border: 1px solid #d8ddff; }
+      .danger { background: #ffecec; border: 1px solid #ffbcbc; }
+      .tiny { font-size: 14px; padding: 6px 10px; }
+      .badge { display:inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; margin-left: 6px; }
+      .badge.active { background:#eaffea; border:1px solid #a6e3a6; }
+      .badge.finished { background:#f2f2f2; border:1px solid #ddd; }
+      .pill { font-size: 14px; padding: 6px 10px; border-radius: 999px; border: 1px solid #ddd; background: #fafafa; }
+      .status { background:#0b0b0b; color:#32ff32; padding: 12px; border-radius: 12px; white-space: pre-wrap; }
+      details summary { cursor:pointer; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <h1>Gym Log</h1>
+    <p class="sub">Log fast. Review later.</p>
+
+    <!-- Create session -->
+    <div class="section">
+      <h2>Create session</h2>
+      <div class="row">
+        <input id="session-date" type="date" />
+        <select id="session-focus">
+          <option value="push">Push</option>
+          <option value="pull">Pull</option>
+          <option value="legs">Legs</option>
+          <option value="mixed">Mixed</option>
+          <option value="cardio">Cardio</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <input id="session-notes" type="text" placeholder="notes (optional)" style="flex:1;" />
+        <button id="btn-create-session">Create</button>
+      </div>
+    </div>
+
+    <!-- Selected session FIRST -->
+    <div class="section">
+      <h2>Selected session</h2>
+      <div id="selected-session" class="muted">No session selected.</div>
+
+      <div style="margin-top:10px;">
+        <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
+      </div>
+
+      <!-- Suggestions (used for Mixed/Cardio) -->
+      <div id="session-suggestions" style="display:none; margin-top:12px;">
+        <div class="muted" style="margin-bottom:6px;">Suggestions (optional)</div>
+        <div id="suggestion-pills" class="row" style="gap:8px;"></div>
+      </div>
+
+      <div id="exercise-controls" style="display:none; margin-top:14px;">
+        <h3 style="margin:0 0 8px;">Add exercise</h3>
+
+        <div class="row" style="margin-top:10px;">
+          <input id="exercise-name" list="exercise-suggestions" type="text" placeholder="exercise name (e.g., RDL)" style="flex:1;" />
+          <datalist id="exercise-suggestions"></datalist>
+          <button id="btn-add-exercise">Add</button>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <input id="exercise-notes" type="text" placeholder="exercise notes (optional)" style="flex:1;" />
+        </div>
+
+        <div class="muted" style="margin-top:10px;">Recent:</div>
+        <div id="recent-exercise-pills" class="row" style="gap:8px; margin-top:6px;"></div>
+      </div>
+
+      <div id="exercises" style="margin-top:12px;"></div>
+    </div>
+
+    <!-- Recent sessions below -->
+    <div class="section">
+      <details id="recent-sessions" open>
+        <summary>Recent sessions</summary>
+        <div style="margin-top:10px;">
+          <button id="btn-refresh-sessions" class="linkbtn">Refresh list</button>
+        </div>
+        <div id="sessions" style="margin-top:10px;"></div>
+      </details>
+    </div>
+
+    <!-- Status -->
+    <div class="section">
+      <details id="status-details">
+        <summary>Status (debug)</summary>
+        <div id="log" class="status" style="margin-top:10px;">Booting...</div>
+      </details>
+    </div>
+
+    <script type="module" src="./js/main.js"></script>
+  </body>
+</html>
