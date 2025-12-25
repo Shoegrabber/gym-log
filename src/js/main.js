@@ -13,6 +13,9 @@ import {
   listExercises,
 addExerciseToSession,
 listSessionExercises,
+listSets,
+insertSet,
+deleteSet
 } from "./db.js";
 
 let selectedSessionId = null;
@@ -103,10 +106,17 @@ async function refreshSessionsList() {
     sessionsEl.appendChild(div);
 
 div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", async () => {
-  await setActiveSessionId(s.id);
-  selectedSessionId = s.id;                 // ✅ ADD THIS LINE
+  // Only mark active if the session is actually active
+  if (s.status === "active") {
+    await setActiveSessionId(s.id);
+  }
+
+  selectedSessionId = s.id;
   const detail = await getSessionDetail(s.id);
   setSelectedSessionUI(detail);
+
+  await renderSelectedSessionExercises(s.id);
+
   logLine(`✅ Opened session id=${s.id}`);
 });
 
@@ -142,14 +152,90 @@ async function renderSelectedSessionExercises(sessionId) {
     return;
   }
 
-  container.innerHTML = rows
+  // Load sets for each session_exercise (MVP: N+1 queries, fine)
+  const rowsWithSets = [];
+  for (const r of rows) {
+    const sets = await listSets(r.id);
+    rowsWithSets.push({ ...r, sets });
+  }
+
+  container.innerHTML = rowsWithSets
     .map(r => {
       const note = r.notes ? ` <span style="color:#777;">— ${r.notes}</span>` : "";
-      return `<div style="padding:6px 0; border-bottom:1px solid #eee;">
-        <strong>${r.exercise_name}</strong>${note}
+
+      const setsHtml = (r.sets || []).length
+        ? `<div style="margin-top:6px; display:flex; flex-direction:column; gap:6px;">
+            ${(r.sets || [])
+              .map(s => {
+                const w = (s.weight === null || s.weight === undefined) ? "" : String(s.weight);
+                const reps = (s.reps === null || s.reps === undefined) ? "" : String(s.reps);
+
+                let label = `#${s.position}`;
+                if (w !== "" && reps !== "") label += ` — ${w}kg × ${reps}`;
+                else if (w !== "") label += ` — ${w}kg`;
+                else if (reps !== "") label += ` — ${reps} reps`;
+
+                return `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                  <div style="color:#333;">${label}</div>
+                  <button data-action="delete-set" data-setid="${s.id}" style="border:1px solid #ddd; background:#fff; padding:4px 8px; border-radius:8px;">🗑</button>
+                </div>`;
+              })
+              .join("")}
+          </div>`
+        : `<div style="margin-top:6px; color:#777;">No sets yet.</div>`;
+
+      const addRow = `
+        <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+          <input data-weight-for="${r.id}" inputmode="decimal" placeholder="kg" style="width:70px; padding:8px; border:1px solid #ddd; border-radius:10px;" />
+          <input data-reps-for="${r.id}" inputmode="numeric" placeholder="reps" style="width:70px; padding:8px; border:1px solid #ddd; border-radius:10px;" />
+          <button data-action="add-set" data-seid="${r.id}" style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">+ Set</button>
+        </div>
+      `;
+
+      return `<div style="padding:10px 0; border-bottom:1px solid #eee;">
+        <div><strong>${r.exercise_name}</strong>${note}</div>
+        ${setsHtml}
+        ${addRow}
       </div>`;
     })
     .join("");
+
+  // Event delegation (overwrite per render; simple + reliable)
+  container.onclick = async (ev) => {
+    const btn = ev.target?.closest?.("button[data-action]");
+    if (!btn) return;
+
+    const action = btn.getAttribute("data-action");
+
+    if (action === "add-set") {
+      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+      const wEl = container.querySelector(`input[data-weight-for="${sessionExerciseId}"]`);
+      const rEl = container.querySelector(`input[data-reps-for="${sessionExerciseId}"]`);
+
+      const weightRaw = (wEl?.value ?? "").trim();
+      const repsRaw = (rEl?.value ?? "").trim();
+
+      await insertSet({
+        sessionExerciseId,
+        weight: weightRaw === "" ? null : weightRaw,
+        reps: repsRaw === "" ? null : repsRaw,
+        notes: null
+      });
+
+      if (wEl) wEl.value = "";
+      if (rEl) rEl.value = "";
+
+      await renderSelectedSessionExercises(sessionId);
+      return;
+    }
+
+    if (action === "delete-set") {
+      const setId = Number(btn.getAttribute("data-setid"));
+      await deleteSet(setId);
+      await renderSelectedSessionExercises(sessionId);
+      return;
+    }
+  };
 }
 
 async function safeStart() {

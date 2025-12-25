@@ -66,18 +66,40 @@ export async function initDb(log) {
         created_at INTEGER NOT NULL
       );
     `);
-// -----------------------------
-// Session exercises (Phase B-1)
-// -----------------------------
-await db.execute(`
-  CREATE TABLE IF NOT EXISTS session_exercises (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL,
-    exercise_name TEXT NOT NULL,
-    notes TEXT,
-    created_at INTEGER NOT NULL
-  );
-`);
+    // -----------------------------
+    // Session exercises (Phase B-1)
+    // -----------------------------
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS session_exercises (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        exercise_name TEXT NOT NULL,
+        notes TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+    `);
+
+    // -----------------------------
+    // Sets (Phase C)
+    // -----------------------------
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS sets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_exercise_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        weight REAL NULL,
+        reps INTEGER NULL,
+        notes TEXT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_exercise_id) REFERENCES session_exercises(id) ON DELETE CASCADE
+      );
+    `);
+
+    await db.execute(`
+      CREATE INDEX IF NOT EXISTS idx_sets_session_exercise_id
+      ON sets(session_exercise_id);
+    `);
 
     if (typeof log === "function") log("✅ initDb OK");
     return db;
@@ -86,6 +108,7 @@ await db.execute(`
     throw e;
   }
 }
+
 /* --------------------------------------------------
    Active session helpers
 -------------------------------------------------- */
@@ -227,6 +250,52 @@ export async function listSessions(limit = 20) {
     [limit]
   );
   return res.values ?? [];
+}
+
+export async function listSets(sessionExerciseId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT id, session_exercise_id, position, weight, reps, notes
+     FROM sets
+     WHERE session_exercise_id = ?
+     ORDER BY position ASC, id ASC;`,
+    [sessionExerciseId]
+  );
+  return res.values ?? [];
+}
+
+async function getNextSetPosition(sessionExerciseId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT COALESCE(MAX(position), 0) + 1 AS nextPos
+     FROM sets
+     WHERE session_exercise_id = ?;`,
+    [sessionExerciseId]
+  );
+  const row = res.values?.[0] ?? null;
+  return row ? Number(row.nextPos) : 1;
+}
+
+export async function insertSet({ sessionExerciseId, weight, reps, notes = null }) {
+  await initDb();
+  const position = await getNextSetPosition(sessionExerciseId);
+
+  const w = (weight === "" || weight === undefined || weight === null) ? null : Number(weight);
+  const r = (reps === "" || reps === undefined || reps === null) ? null : Number(reps);
+  const n = (notes === "" || notes === undefined || notes === null) ? null : String(notes);
+
+  const result = await db.run(
+    `INSERT INTO sets (session_exercise_id, position, weight, reps, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?);`,
+    [sessionExerciseId, position, w, r, n, Date.now()]
+  );
+
+  return { id: result.lastId, session_exercise_id: sessionExerciseId, position, weight: w, reps: r, notes: n };
+}
+
+export async function deleteSet(setId) {
+  await initDb();
+  await db.run(`DELETE FROM sets WHERE id = ?;`, [setId]);
 }
 
 export async function getSessionDetail(sessionId) {
