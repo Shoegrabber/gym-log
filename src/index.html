@@ -29,6 +29,7 @@
     <h1>Gym Log</h1>
     <p class="sub">Log fast. Review later.</p>
 
+<div id="home-view">
     <!-- Create session -->
     <div class="section">
       <h2>Create session</h2>
@@ -49,14 +50,34 @@
       </div>
     </div>
 
+<!-- Recent sessions below -->
+<div class="section">
+  <details id="recent-sessions" open>
+    <summary>Recent sessions</summary>
+    <div style="margin-top:10px;">
+      <button id="btn-refresh-sessions" class="linkbtn">Refresh list</button>
+    </div>
+
+    <div id="sessions" style="margin-top:10px;"></div>
+
+    <div style="margin-top:10px;">
+      <button id="btn-toggle-sessions" class="linkbtn tiny" style="display:none;">Show all</button>
+    </div>
+  </details>
+</div>
+
+</div> <!-- end home-view -->
+
+<div id="session-view" style="display:none;">
     <!-- Selected session FIRST -->
     <div class="section">
       <h2>Selected session</h2>
       <div id="selected-session" class="muted">No session selected.</div>
 
-      <div style="margin-top:10px;">
-        <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
-      </div>
+<div style="margin-top:10px;">
+  <button id="btn-back-home" class="linkbtn tiny">Back</button>
+  <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
+</div>
 
       <!-- Suggestions (used for Mixed/Cardio) -->
       <div id="session-suggestions" style="display:none; margin-top:12px;">
@@ -67,18 +88,18 @@
       <div id="exercise-controls" style="display:none; margin-top:14px;">
         <h3 style="margin:0 0 8px;">Add exercise</h3>
 
-        <div class="row" style="margin-top:10px;">
-          <input id="exercise-name" list="exercise-suggestions" type="text" placeholder="exercise name (e.g., RDL)" style="flex:1;" />
-<div id="exercise-picker" style="margin-top:8px; width:100%;">
+<div style="margin-top:10px;">
   <input
     id="exercise-picker-search"
     type="text"
-    placeholder="tap list or search (e.g., squat)"
-    style="width:100%; padding:8px; box-sizing:border-box;"
+    placeholder="add or search exercise (e.g., squat)"
+    style="width:100%; padding:10px; border:1px solid #ddd; border-radius:10px;"
   />
+
   <div
     id="exercise-picker-list"
-    style="max-height:220px; overflow:auto; border:1px solid #ddd; border-radius:8px; margin-top:8px;"
+    style="max-height:220px; overflow:auto; border:1px solid #ddd;
+           border-radius:10px; margin-top:8px;"
   ></div>
 </div>
 
@@ -96,17 +117,7 @@
 
       <div id="exercises" style="margin-top:12px;"></div>
     </div>
-
-    <!-- Recent sessions below -->
-    <div class="section">
-      <details id="recent-sessions" open>
-        <summary>Recent sessions</summary>
-        <div style="margin-top:10px;">
-          <button id="btn-refresh-sessions" class="linkbtn">Refresh list</button>
-        </div>
-        <div id="sessions" style="margin-top:10px;"></div>
-      </details>
-    </div>
+</div> <!-- end session-view -->
 
     <!-- Status -->
     <div class="section">
