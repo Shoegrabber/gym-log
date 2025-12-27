@@ -1,3 +1,4 @@
+import { defineCustomElements as jeepSqliteDefineCustomElements } from "jeep-sqlite/loader";
 import { SplashScreen } from "@capacitor/splash-screen";
 import {
   initDb,
@@ -13,7 +14,28 @@ import {
   listExercises,
 addExerciseToSession,
 listSessionExercises,
+preloadTemplateExercises,
 } from "./db.js";
+
+async function ensureJeepSqliteElementReady() {
+  // Wait until HTML is parsed
+  if (document.readyState === "loading") {
+    await new Promise((resolve) =>
+      window.addEventListener("DOMContentLoaded", resolve, { once: true })
+    );
+  }
+
+  // If the element isn't in the DOM yet for any reason, wait a tick
+  if (!document.querySelector("jeep-sqlite")) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  // Wait until the custom element is defined (so CapacitorSQLiteWeb can use it)
+  if (window.customElements?.whenDefined) {
+    await window.customElements.whenDefined("jeep-sqlite");
+  }
+}
+
 
 let selectedSessionId = null;
 
@@ -155,7 +177,34 @@ async function renderSelectedSessionExercises(sessionId) {
 async function safeStart() {
   try {
     logLine("✅ JS loaded (Phase A: session lifecycle)");
-    await initDb(logLine);
+// Web platform: ensure <jeep-sqlite> custom element is registered
+
+// Web platform: ensure <jeep-sqlite> custom element is registered
+try { jeepSqliteDefineCustomElements(window); } catch (e) {}
+
+// Wait until the element is defined + present + fully upgraded
+await ensureJeepSqliteElementReady();
+
+const jeepEl = document.querySelector("jeep-sqlite");
+logLine("DOM readyState:", document.readyState);
+logLine("Has <jeep-sqlite>:", !!jeepEl);
+logLine("customElements has jeep-sqlite:", !!window.customElements?.get?.("jeep-sqlite"));
+
+try {
+  if (jeepEl?.componentOnReady) {
+    await jeepEl.componentOnReady();
+    logLine("✅ jeep-sqlite componentOnReady OK");
+  } else {
+    // If componentOnReady doesn't exist, at least wait a tick after definition
+    await new Promise((r) => setTimeout(r, 0));
+    logLine("ℹ️ jeep-sqlite has no componentOnReady; waited a tick");
+  }
+} catch (e) {
+  logLine("⚠️ jeep-sqlite componentOnReady failed:", String(e));
+}
+
+// Now init SQLite
+await initDb(logLine);
 
 try {
   await seedExercisesFromCsv(logLine);
@@ -188,6 +237,9 @@ createBtn?.addEventListener("click", async () => {
 
     const id = await createSession({ date, focus, notes });
 selectedSessionId = id;
+
+await preloadTemplateExercises(id, focus, logLine);
+
     const detail = await getSessionDetail(id);
 
     setSelectedSessionUI(detail);
@@ -337,4 +389,6 @@ if (exerciseNotesInput) exerciseNotesInput.value = "";
   }
 }
 
-safeStart();
+window.addEventListener("DOMContentLoaded", () => {
+  safeStart();
+}, { once: true });

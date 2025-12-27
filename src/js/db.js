@@ -1,5 +1,6 @@
 import { CapacitorSQLite, SQLiteConnection } from "@capacitor-community/sqlite";
 import { Capacitor } from "@capacitor/core";
+import { TEMPLATES, resolveExerciseName } from "./templates.js";
 
 const DB_NAME = "gym_log";
 const DB_VERSION = 1;
@@ -22,6 +23,16 @@ export async function initDb(log) {
       await sqlite.checkConnectionsConsistency();
     } catch (_) {}
 
+// Web platform needs initWebStore() once before any connections
+if (Capacitor.getPlatform && Capacitor.getPlatform() === "web") {
+  try {
+    await sqlite.initWebStore();
+    if (typeof log === "function") log("✅ initWebStore OK");
+  } catch (e) {
+    if (typeof log === "function") log("⚠️ initWebStore failed:", String(e));
+  }
+}
+
     const conn = await sqlite.createConnection(
       DB_NAME,
       false,            // encrypted
@@ -34,50 +45,62 @@ export async function initDb(log) {
     await conn.open();
     db = conn;
 
-    // -----------------------------
-    // Core tables (Phase A)
-    // -----------------------------
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        date TEXT NOT NULL,
-        focus TEXT NOT NULL,
-        notes TEXT,
-        status TEXT NOT NULL DEFAULT 'active',
-        created_at INTEGER NOT NULL,
-        finished_at INTEGER
-      );
-    `);
-
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS app_state (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      );
-    `);
-
-    // -----------------------------
-    // Exercises library (Phase B-0)
-    // -----------------------------
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS exercises (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL
-      );
-    `);
 // -----------------------------
-// Session exercises (Phase B-1)
+// Core tables (Phase A)
+// -----------------------------
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    focus TEXT NOT NULL,
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    finished_at INTEGER
+  );
+`);
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+`);
+
+// -----------------------------
+// Exercises library (Phase B-0)
+// -----------------------------
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS exercises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+  );
+`);
+
+// -----------------------------
+// Session exercises (Phase B-1 + Phase E ordering)
 // -----------------------------
 await db.execute(`
   CREATE TABLE IF NOT EXISTS session_exercises (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
     exercise_name TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
     notes TEXT,
     created_at INTEGER NOT NULL
   );
 `);
+
+// Phase E: ensure session_exercises.position exists on older installs (migration)
+try {
+  await db.execute(`
+    ALTER TABLE session_exercises
+    ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+  `);
+} catch (e) {
+  // ignore "duplicate column name" errors (already migrated)
+}
 
     if (typeof log === "function") log("✅ initDb OK");
     return db;
@@ -223,7 +246,7 @@ export async function createSession({ date, focus, notes }) {
 export async function listSessions(limit = 20) {
   await initDb();
   const res = await db.query(
-    `SELECT * FROM sessions ORDER BY created_at DESC LIMIT ?`,
+    `SELECT * FROM sessions ORDER BY created_at ASC LIMIT ?`,
     [limit]
   );
   return res.values ?? [];
@@ -258,6 +281,38 @@ export async function addExerciseToSession(sessionId, exerciseName, notes = null
      VALUES (?, ?, ?, ?)`,
     [sessionId, String(exerciseName).trim(), notes ? String(notes).trim() : null, now]
   );
+}
+
+export async function preloadTemplateExercises(sessionId, focus, log = null) {
+  await initDb();
+
+  const type = String(focus || "other").trim().toLowerCase();
+  const tpl = TEMPLATES[type];
+
+  // Only Push/Pull/Legs preload. Others intentionally load empty.
+  if (!tpl || (type !== "push" && type !== "pull" && type !== "legs")) return;
+
+  // Build ordered list: anchors then suggested
+  const ordered = [...(tpl.anchors || []), ...(tpl.suggested || [])];
+
+  for (const item of ordered) {
+    const canonical = resolveExerciseName(item);
+
+    // Data integrity: verify it exists in exercises table (seeded)
+    const exists = await db.query(
+      `SELECT id FROM exercises WHERE name = ? LIMIT 1`,
+      [canonical]
+    );
+
+    if (!exists.values || exists.values.length === 0) {
+      if (typeof log === "function") {
+        log(`⚠️ Template exercise missing from seed: "${canonical}" (skipped)`);
+      }
+      continue; // no silent mismatch, no auto-add to seed
+    }
+
+    await addExerciseToSession(sessionId, canonical);
+  }
 }
 
 export async function listSessionExercises(sessionId) {
