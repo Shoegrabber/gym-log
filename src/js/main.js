@@ -1,4 +1,5 @@
 import { SplashScreen } from "@capacitor/splash-screen";
+import { Capacitor } from "@capacitor/core";
 import { CapacitorSQLite } from "@capacitor-community/sqlite";
 import { defineCustomElements as jeepSqliteDefineCustomElements } from "jeep-sqlite/loader";
 import {
@@ -262,7 +263,14 @@ async function initSqliteWeb(log) {
 async function safeStart() {
   try {
     logLine("✅ JS loaded (Phase A: session lifecycle)");
-await initSqliteWeb(logLine);
+
+const platform = Capacitor.getPlatform();
+logLine("Platform:", platform);
+
+if (platform === "web") {
+  await initSqliteWeb(logLine);
+}
+
 await initDb(logLine);
 
 try {
