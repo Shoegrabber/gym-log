@@ -1,6 +1,5 @@
 import { CapacitorSQLite, SQLiteConnection } from "@capacitor-community/sqlite";
 import { Capacitor } from "@capacitor/core";
-import { TEMPLATES, resolveExerciseName } from "./templates.js";
 
 const DB_NAME = "gym_log";
 const DB_VERSION = 1;
@@ -23,16 +22,6 @@ export async function initDb(log) {
       await sqlite.checkConnectionsConsistency();
     } catch (_) {}
 
-// Web platform needs initWebStore() once before any connections
-if (Capacitor.getPlatform && Capacitor.getPlatform() === "web") {
-  try {
-    await sqlite.initWebStore();
-    if (typeof log === "function") log("✅ initWebStore OK");
-  } catch (e) {
-    if (typeof log === "function") log("⚠️ initWebStore failed:", String(e));
-  }
-}
-
     const conn = await sqlite.createConnection(
       DB_NAME,
       false,            // encrypted
@@ -45,62 +34,95 @@ if (Capacitor.getPlatform && Capacitor.getPlatform() === "web") {
     await conn.open();
     db = conn;
 
-// -----------------------------
-// Core tables (Phase A)
-// -----------------------------
-await db.execute(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL,
-    focus TEXT NOT NULL,
-    notes TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at INTEGER NOT NULL,
-    finished_at INTEGER
-  );
-`);
+    // -----------------------------
+    // Core tables (Phase A)
+    // -----------------------------
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        focus TEXT NOT NULL,
+        notes TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at INTEGER NOT NULL,
+        finished_at INTEGER
+      );
+    `);
 
-await db.execute(`
-  CREATE TABLE IF NOT EXISTS app_state (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-`);
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      );
+    `);
 
-// -----------------------------
-// Exercises library (Phase B-0)
-// -----------------------------
-await db.execute(`
-  CREATE TABLE IF NOT EXISTS exercises (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    created_at INTEGER NOT NULL
-  );
-`);
+    // -----------------------------
+    // Exercises library (Phase B-0)
+    // -----------------------------
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS exercises (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    // -----------------------------
+    // Session exercises (Phase B-1)
+    // -----------------------------
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS session_exercises (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        exercise_name TEXT NOT NULL,
+        notes TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+    `);
 
-// -----------------------------
-// Session exercises (Phase B-1 + Phase E ordering)
-// -----------------------------
-await db.execute(`
-  CREATE TABLE IF NOT EXISTS session_exercises (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER NOT NULL,
-    exercise_name TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0,
-    notes TEXT,
-    created_at INTEGER NOT NULL
-  );
-`);
-
-// Phase E: ensure session_exercises.position exists on older installs (migration)
+// Phase E — Migration: add ordering column to session_exercises (position)
+// Must run AFTER table exists, safe to run multiple times
 try {
   await db.execute(`
     ALTER TABLE session_exercises
-    ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+    ADD COLUMN position INTEGER NOT NULL DEFAULT 0
   `);
+  if (typeof log === "function") {
+    log("✅ Migration OK: added session_exercises.position");
+  }
 } catch (e) {
-  // ignore "duplicate column name" errors (already migrated)
+  // Ignore duplicate-column errors (already migrated)
+  const msg = String(e || "").toLowerCase();
+  if (
+    !msg.includes("duplicate") &&
+    !msg.includes("already exists")
+  ) {
+    if (typeof log === "function") {
+      log("⚠️ Migration warning (position):", msg);
+    }
+  }
 }
+
+    // -----------------------------
+    // Sets (Phase C)
+    // -----------------------------
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS sets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_exercise_id INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        weight REAL NULL,
+        reps INTEGER NULL,
+        notes TEXT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_exercise_id) REFERENCES session_exercises(id) ON DELETE CASCADE
+      );
+    `);
+
+    await db.execute(`
+      CREATE INDEX IF NOT EXISTS idx_sets_session_exercise_id
+      ON sets(session_exercise_id);
+    `);
 
     if (typeof log === "function") log("✅ initDb OK");
     return db;
@@ -109,6 +131,7 @@ try {
     throw e;
   }
 }
+
 /* --------------------------------------------------
    Active session helpers
 -------------------------------------------------- */
@@ -246,10 +269,56 @@ export async function createSession({ date, focus, notes }) {
 export async function listSessions(limit = 20) {
   await initDb();
   const res = await db.query(
-    `SELECT * FROM sessions ORDER BY created_at ASC LIMIT ?`,
+    `SELECT * FROM sessions ORDER BY created_at DESC LIMIT ?`,
     [limit]
   );
   return res.values ?? [];
+}
+
+export async function listSets(sessionExerciseId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT id, session_exercise_id, position, weight, reps, notes
+     FROM sets
+     WHERE session_exercise_id = ?
+     ORDER BY position ASC, id ASC;`,
+    [sessionExerciseId]
+  );
+  return res.values ?? [];
+}
+
+async function getNextSetPosition(sessionExerciseId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT COALESCE(MAX(position), 0) + 1 AS nextPos
+     FROM sets
+     WHERE session_exercise_id = ?;`,
+    [sessionExerciseId]
+  );
+  const row = res.values?.[0] ?? null;
+  return row ? Number(row.nextPos) : 1;
+}
+
+export async function insertSet({ sessionExerciseId, weight, reps, notes = null }) {
+  await initDb();
+  const position = await getNextSetPosition(sessionExerciseId);
+
+  const w = (weight === "" || weight === undefined || weight === null) ? null : Number(weight);
+  const r = (reps === "" || reps === undefined || reps === null) ? null : Number(reps);
+  const n = (notes === "" || notes === undefined || notes === null) ? null : String(notes);
+
+  const result = await db.run(
+    `INSERT INTO sets (session_exercise_id, position, weight, reps, notes, created_at)
+     VALUES (?, ?, ?, ?, ?, ?);`,
+    [sessionExerciseId, position, w, r, n, Date.now()]
+  );
+
+  return { id: result.lastId, session_exercise_id: sessionExerciseId, position, weight: w, reps: r, notes: n };
+}
+
+export async function deleteSet(setId) {
+  await initDb();
+  await db.run(`DELETE FROM sets WHERE id = ?;`, [setId]);
 }
 
 export async function getSessionDetail(sessionId) {
@@ -283,38 +352,6 @@ export async function addExerciseToSession(sessionId, exerciseName, notes = null
   );
 }
 
-export async function preloadTemplateExercises(sessionId, focus, log = null) {
-  await initDb();
-
-  const type = String(focus || "other").trim().toLowerCase();
-  const tpl = TEMPLATES[type];
-
-  // Only Push/Pull/Legs preload. Others intentionally load empty.
-  if (!tpl || (type !== "push" && type !== "pull" && type !== "legs")) return;
-
-  // Build ordered list: anchors then suggested
-  const ordered = [...(tpl.anchors || []), ...(tpl.suggested || [])];
-
-  for (const item of ordered) {
-    const canonical = resolveExerciseName(item);
-
-    // Data integrity: verify it exists in exercises table (seeded)
-    const exists = await db.query(
-      `SELECT id FROM exercises WHERE name = ? LIMIT 1`,
-      [canonical]
-    );
-
-    if (!exists.values || exists.values.length === 0) {
-      if (typeof log === "function") {
-        log(`⚠️ Template exercise missing from seed: "${canonical}" (skipped)`);
-      }
-      continue; // no silent mismatch, no auto-add to seed
-    }
-
-    await addExerciseToSession(sessionId, canonical);
-  }
-}
-
 export async function listSessionExercises(sessionId) {
   await initDb();
   const res = await db.query(
@@ -335,4 +372,40 @@ export async function deleteSession(sessionId, log) {
     await clearActiveSessionId();
   }
   if (typeof log === "function") log(`✅ deleteSession OK (id=${sessionId})`);
+}
+// --------------------------------------------------
+// Phase E — Template preload
+// --------------------------------------------------
+import { TEMPLATES } from "./templates.js";
+
+export async function preloadTemplateExercises(sessionId, focus, log) {
+  await initDb();
+
+  const tpl = TEMPLATES[focus];
+  if (!tpl) {
+    if (typeof log === "function") {
+      log(`ℹ️ No template for focus="${focus}"`);
+    }
+    return;
+  }
+
+  let position = 0;
+
+  const all = [
+    ...(tpl.anchors || []),
+    ...(tpl.suggested || []),
+  ];
+
+  for (const name of all) {
+    await db.run(
+      `INSERT INTO session_exercises
+       (session_id, exercise_name, position, created_at)
+       VALUES (?, ?, ?, ?)`,
+      [sessionId, name, position++, Date.now()]
+    );
+  }
+
+  if (typeof log === "function") {
+    log(`✅ Preloaded ${all.length} template exercises for ${focus}`);
+  }
 }
