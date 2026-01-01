@@ -2,6 +2,7 @@ import { SplashScreen } from "@capacitor/splash-screen";
 import { Capacitor } from "@capacitor/core";
 import { CapacitorSQLite } from "@capacitor-community/sqlite";
 import { defineCustomElements as jeepSqliteDefineCustomElements } from "jeep-sqlite/loader";
+import { exportAll } from "./export.js";
 import {
   initDb,
   createSession,
@@ -363,10 +364,12 @@ try {
     const createBtn = document.getElementById("btn-create-session");
     const finishBtn = document.getElementById("btn-finish-session");
     const refreshBtn = document.getElementById("btn-refresh-sessions");
+const exportBtn  = document.getElementById("btn-export-data");
 
     if (!createBtn) logLine("❌ Missing #btn-create-session in DOM");
     if (!finishBtn) logLine("❌ Missing #btn-finish-session in DOM");
     if (!refreshBtn) logLine("❌ Missing #btn-refresh-sessions in DOM");
+if (!exportBtn) logLine("❌ Missing #btn-export-data in DOM");
 
 createBtn?.addEventListener("click", async () => {
   try {
@@ -389,6 +392,16 @@ await renderSelectedSessionExercises(selectedSessionId);
   } catch (e) {
     logLine("❌ Create session failed:", String(e));
     if (e?.stack) logLine(e.stack);
+  }
+});
+
+exportBtn?.addEventListener("click", async () => {
+  try {
+    await exportAll({
+      log: typeof logLine === "function" ? logLine : undefined
+    });
+  } catch (e) {
+    logLine("❌ Export failed:", String(e));
   }
 });
 

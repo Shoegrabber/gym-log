@@ -1,5 +1,13 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
+allprojects {
+    tasks.withType(JavaCompile).configureEach {
+        javaCompiler = javaToolchains.compilerFor {
+            languageVersion = JavaLanguageVersion.of(17)
+        }
+    }
+}
+
 buildscript {
     repositories {
         google()
@@ -47,4 +55,16 @@ subprojects { proj ->
 
 task clean(type: Delete) {
     delete rootProject.buildDir
+}
+
+// --- Force Kotlin JVM target to 17 (must match Java 17) ---
+subprojects { p ->
+    tasks.matching { t ->
+        t.name.toLowerCase().contains("compile") &&
+        t.name.toLowerCase().contains("kotlin")
+    }.configureEach { t ->
+        if (t.hasProperty("kotlinOptions")) {
+            t.kotlinOptions.jvmTarget = "17"
+        }
+    }
 }
