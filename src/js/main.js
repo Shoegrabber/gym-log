@@ -190,43 +190,71 @@ async function renderSelectedSessionExercises(sessionId) {
           </div>`
         : `<div style="margin-top:6px; color:#777;">No sets yet.</div>`;
 
-const addRow = `
-  <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-    <input
-      data-weight-for="${r.id}"
-      inputmode="decimal"
-      placeholder="kg"
-      style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
-    />
-    <input
-      data-reps-for="${r.id}"
-      inputmode="numeric"
-      placeholder="reps"
-      style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
-    />
+let addRow = "";
 
-    <button
-      data-action="add-set"
-      data-seid="${r.id}"
-      style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
-      + Set
-    </button>
+if (r.measurement_type === "time_only") {
+  addRow = `
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+      <input
+        data-duration-for="${r.id}"
+        inputmode="numeric"
+        placeholder="seconds"
+        style="width:110px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+      />
+      <button
+        data-action="add-time-set"
+        data-seid="${r.id}"
+        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        + Set
+      </button>
+    </div>
+  `;
+} else if (r.measurement_type === "notes_only") {
+  addRow = `
+    <div style="margin-top:8px; color:#777;">
+      Notes only — no sets for this exercise.
+    </div>
+  `;
+} else {
+  // DEFAULT: weight + reps (this is your existing UI, preserved)
+  addRow = `
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <input
+        data-weight-for="${r.id}"
+        inputmode="decimal"
+        placeholder="kg"
+        style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+      />
+      <input
+        data-reps-for="${r.id}"
+        inputmode="numeric"
+        placeholder="reps"
+        style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+      />
 
-    <button
-      data-action="repeat-set"
-      data-seid="${r.id}"
-      style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
-      ↻ Repeat
-    </button>
+      <button
+        data-action="add-set"
+        data-seid="${r.id}"
+        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        + Set
+      </button>
 
-    <button
-      data-action="delete-exercise"
-      data-seid="${r.id}"
-      style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
-      ✖ Remove
-    </button>
-  </div>
-`;
+      <button
+        data-action="repeat-set"
+        data-seid="${r.id}"
+        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        ↻ Repeat
+      </button>
+
+      <button
+        data-action="delete-exercise"
+        data-seid="${r.id}"
+        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        ✖ Remove
+      </button>
+    </div>
+  `;
+}
 
       return `<div style="padding:10px 0; border-bottom:1px solid #eee;">
         <div><strong>${r.exercise_name}</strong>${note}</div>
@@ -347,6 +375,7 @@ if (platform === "web") {
 }
 
 await initDb(logLine);
+
 
 try {
   await seedExercisesFromCsv(logLine);

@@ -435,9 +435,16 @@ export async function addExerciseToSession(sessionId, exerciseName, notes = null
 export async function listSessionExercises(sessionId) {
   await initDb();
   const res = await db.query(
-    `SELECT * FROM session_exercises
-     WHERE session_id = ?
-     ORDER BY created_at DESC`,
+    `
+    SELECT
+      se.*,
+      e.measurement_type
+    FROM session_exercises se
+    LEFT JOIN exercises e
+      ON e.name = se.exercise_name
+    WHERE se.session_id = ?
+    ORDER BY se.created_at DESC
+    `,
     [sessionId]
   );
   return res.values ?? [];

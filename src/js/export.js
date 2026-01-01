@@ -109,14 +109,38 @@ export async function exportAllWeb({ log } = {}) {
      ORDER BY session_id ASC, position ASC, created_at ASC, id ASC;`
   );
 
-  // 4) sets
-  const setsHeaders = ["id", "session_exercise_id", "position", "weight", "reps", "notes", "created_at"];
-  const sets = await queryAll(
-    conn,
-    `SELECT id, session_exercise_id, position, weight, reps, notes, created_at
-     FROM sets
-     ORDER BY session_exercise_id ASC, position ASC, created_at ASC, id ASC;`
-  );
+// 4) sets
+const setsHeaders = [
+  "id",
+  "session_exercise_id",
+  "position",
+  "weight",
+  "weight_unit",
+  "reps",
+  "duration_sec",
+  "distance_m",
+  "assisted",
+  "notes",
+  "created_at"
+];
+
+const sets = await queryAll(
+  conn,
+  `SELECT
+      id,
+      session_exercise_id,
+      position,
+      weight,
+      weight_unit,
+      reps,
+      duration_sec,
+      distance_m,
+      assisted,
+      notes,
+      created_at
+   FROM sets
+   ORDER BY session_exercise_id ASC, position ASC, created_at ASC, id ASC;`
+);
 
   const stamp = exportStamp();
 
@@ -175,12 +199,36 @@ export async function exportAllAndroid({ log } = {}) {
     ORDER BY session_id ASC, position ASC, created_at ASC, id ASC;
   `);
 
-  const setsHeaders = ["id", "session_exercise_id", "position", "weight", "reps", "notes", "created_at"];
-  const sets = await queryAll(conn, `
-    SELECT id, session_exercise_id, position, weight, reps, notes, created_at
-    FROM sets
-    ORDER BY session_exercise_id ASC, position ASC, created_at ASC, id ASC;
-  `);
+const setsHeaders = [
+  "id",
+  "session_exercise_id",
+  "position",
+  "weight",
+  "weight_unit",
+  "reps",
+  "duration_sec",
+  "distance_m",
+  "assisted",
+  "notes",
+  "created_at"
+];
+
+const sets = await queryAll(conn, `
+  SELECT
+    id,
+    session_exercise_id,
+    position,
+    weight,
+    weight_unit,
+    reps,
+    duration_sec,
+    distance_m,
+    assisted,
+    notes,
+    created_at
+  FROM sets
+  ORDER BY session_exercise_id ASC, position ASC, created_at ASC, id ASC;
+`);
 
   const stamp = exportStamp();
   const folder = `GymLogExports/${stamp}`;
