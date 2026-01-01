@@ -59,13 +59,37 @@ export async function initDb(log) {
     // -----------------------------
     // Exercises library (Phase B-0)
     // -----------------------------
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS exercises (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        created_at INTEGER NOT NULL
-      );
-    `);
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS exercises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    measurement_type TEXT NOT NULL DEFAULT 'weight_reps',
+    created_at INTEGER NOT NULL
+  );
+`);
+
+// Phase G — Migration: add measurement_type to exercises
+try {
+  await db.execute(`
+    ALTER TABLE exercises
+    ADD COLUMN measurement_type TEXT NOT NULL DEFAULT 'weight_reps'
+  `);
+  if (typeof log === "function") {
+    log("✅ Migration OK: added exercises.measurement_type");
+  }
+} catch (e) {
+  const msg = String(e || "").toLowerCase();
+  if (
+    !msg.includes("duplicate") &&
+    !msg.includes("already exists")
+  ) {
+    if (typeof log === "function") {
+      log("⚠️ Migration warning (measurement_type):", msg);
+    }
+  }
+}
+
     // -----------------------------
     // Session exercises (Phase B-1)
     // -----------------------------
@@ -106,18 +130,69 @@ try {
     // -----------------------------
     // Sets (Phase C)
     // -----------------------------
-    await db.execute(`
-      CREATE TABLE IF NOT EXISTS sets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_exercise_id INTEGER NOT NULL,
-        position INTEGER NOT NULL,
-        weight REAL NULL,
-        reps INTEGER NULL,
-        notes TEXT NULL,
-        created_at INTEGER NOT NULL,
-        FOREIGN KEY (session_exercise_id) REFERENCES session_exercises(id) ON DELETE CASCADE
-      );
-    `);
+
+await db.execute(`
+  CREATE TABLE IF NOT EXISTS sets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_exercise_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    weight REAL NULL,
+    weight_unit TEXT NULL,
+    reps INTEGER NULL,
+    duration_sec INTEGER NULL,
+    distance_m REAL NULL,
+    assisted INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (session_exercise_id) REFERENCES session_exercises(id) ON DELETE CASCADE
+  );
+`);
+
+// Phase G — Migration: extend sets for semantics
+
+// 1) weight_unit
+try {
+  await db.execute(`ALTER TABLE sets ADD COLUMN weight_unit TEXT NULL`);
+  if (typeof log === "function") log("✅ Migration OK: added sets.weight_unit");
+} catch (e) {
+  const msg = String(e || "").toLowerCase();
+  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+    if (typeof log === "function") log("⚠️ Migration warning (sets.weight_unit):", msg);
+  }
+}
+
+// 2) duration_sec
+try {
+  await db.execute(`ALTER TABLE sets ADD COLUMN duration_sec INTEGER NULL`);
+  if (typeof log === "function") log("✅ Migration OK: added sets.duration_sec");
+} catch (e) {
+  const msg = String(e || "").toLowerCase();
+  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+    if (typeof log === "function") log("⚠️ Migration warning (sets.duration_sec):", msg);
+  }
+}
+
+// 3) distance_m
+try {
+  await db.execute(`ALTER TABLE sets ADD COLUMN distance_m REAL NULL`);
+  if (typeof log === "function") log("✅ Migration OK: added sets.distance_m");
+} catch (e) {
+  const msg = String(e || "").toLowerCase();
+  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+    if (typeof log === "function") log("⚠️ Migration warning (sets.distance_m):", msg);
+  }
+}
+
+// 4) assisted
+try {
+  await db.execute(`ALTER TABLE sets ADD COLUMN assisted INTEGER NOT NULL DEFAULT 0`);
+  if (typeof log === "function") log("✅ Migration OK: added sets.assisted");
+} catch (e) {
+  const msg = String(e || "").toLowerCase();
+  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+    if (typeof log === "function") log("⚠️ Migration warning (sets.assisted):", msg);
+  }
+}
 
     await db.execute(`
       CREATE INDEX IF NOT EXISTS idx_sets_session_exercise_id
