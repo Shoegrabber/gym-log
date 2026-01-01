@@ -227,6 +227,11 @@ export async function listExercises(limit = 500) {
   return res.values ?? [];
 }
 
+export async function deleteSessionExercise(sessionExerciseId) {
+  const conn = await initDb(() => {});
+  await conn.run(`DELETE FROM session_exercises WHERE id = ?;`, [sessionExerciseId]);
+}
+
 /* --------------------------------------------------
    Session lifecycle
 -------------------------------------------------- */
@@ -362,6 +367,8 @@ export async function listSessionExercises(sessionId) {
   );
   return res.values ?? [];
 }
+
+// Phase E.1 — delete a single exercise from a session (template cleanup)
 
 export async function deleteSession(sessionId, log) {
   await initDb(log);

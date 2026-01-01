@@ -17,6 +17,7 @@ preloadTemplateExercises,
   listExercises,
 addExerciseToSession,
 listSessionExercises,
+deleteSessionExercise,
 listSets,
 insertSet,
 deleteSet
@@ -188,13 +189,43 @@ async function renderSelectedSessionExercises(sessionId) {
           </div>`
         : `<div style="margin-top:6px; color:#777;">No sets yet.</div>`;
 
-      const addRow = `
-        <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
-          <input data-weight-for="${r.id}" inputmode="decimal" placeholder="kg" style="width:70px; padding:8px; border:1px solid #ddd; border-radius:10px;" />
-          <input data-reps-for="${r.id}" inputmode="numeric" placeholder="reps" style="width:70px; padding:8px; border:1px solid #ddd; border-radius:10px;" />
-          <button data-action="add-set" data-seid="${r.id}" style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">+ Set</button>
-        </div>
-      `;
+const addRow = `
+  <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+    <input
+      data-weight-for="${r.id}"
+      inputmode="decimal"
+      placeholder="kg"
+      style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+    />
+    <input
+      data-reps-for="${r.id}"
+      inputmode="numeric"
+      placeholder="reps"
+      style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+    />
+
+    <button
+      data-action="add-set"
+      data-seid="${r.id}"
+      style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+      + Set
+    </button>
+
+    <button
+      data-action="repeat-set"
+      data-seid="${r.id}"
+      style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+      ↻ Repeat
+    </button>
+
+    <button
+      data-action="delete-exercise"
+      data-seid="${r.id}"
+      style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+      ✖ Remove
+    </button>
+  </div>
+`;
 
       return `<div style="padding:10px 0; border-bottom:1px solid #eee;">
         <div><strong>${r.exercise_name}</strong>${note}</div>
@@ -239,6 +270,49 @@ async function renderSelectedSessionExercises(sessionId) {
       await renderSelectedSessionExercises(sessionId);
       return;
     }
+
+  if (action === "repeat-set") {
+    try {
+      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+      logLine("🟦 repeat-set clicked:", { sessionExerciseId });
+
+      const sets = await listSets(sessionExerciseId);
+      if (!sets.length) {
+        logLine("⚠️ No sets to repeat for this exercise.");
+        return;
+      }
+
+      const last = sets[sets.length - 1];
+      await insertSet({
+        sessionExerciseId,
+        weight: last.weight,
+        reps: last.reps,
+        notes: last.notes || null,
+      });
+
+      logLine("✅ Repeated last set:", { weight: last.weight, reps: last.reps });
+      await renderSelectedSessionExercises(selectedSessionId);
+    } catch (e) {
+      logLine("❌ repeat-set failed:", String(e));
+      if (e?.stack) logLine(e.stack);
+    }
+  }
+
+  if (action === "delete-exercise") {
+    try {
+      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+      logLine("🟦 delete-exercise clicked:", { sessionExerciseId });
+
+      await deleteSessionExercise(sessionExerciseId);
+
+      logLine("✅ Removed exercise from session_exercises:", { sessionExerciseId });
+      await renderSelectedSessionExercises(selectedSessionId);
+    } catch (e) {
+      logLine("❌ delete-exercise failed:", String(e));
+      if (e?.stack) logLine(e.stack);
+    }
+  }
+
   };
 }
 

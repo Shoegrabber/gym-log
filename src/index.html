@@ -70,18 +70,23 @@
 
         <div class="row" style="margin-top:10px;">
           <input id="exercise-name" list="exercise-suggestions" type="text" placeholder="exercise name (e.g., RDL)" style="flex:1;" />
-<div id="exercise-picker" style="margin-top:8px; width:100%;">
-  <input
-    id="exercise-picker-search"
-    type="text"
-    placeholder="tap list or search (e.g., squat)"
-    style="width:100%; padding:8px; box-sizing:border-box;"
-  />
-  <div
-    id="exercise-picker-list"
-    style="max-height:220px; overflow:auto; border:1px solid #ddd; border-radius:8px; margin-top:8px;"
-  ></div>
-</div>
+
+<details id="exercise-picker-details" style="margin-top:8px;">
+  <summary class="muted">Search / pick from library</summary>
+
+  <div id="exercise-picker" style="margin-top:8px; width:100%;">
+    <input
+      id="exercise-picker-search"
+      type="text"
+      placeholder="tap list or search (e.g., squat)"
+      style="width:100%; padding:8px; box-sizing:border-box;"
+    />
+    <div
+      id="exercise-picker-list"
+      style="max-height:140px; overflow:auto; border:1px solid #ddd; border-radius:8px; margin-top:8px;"
+    ></div>
+  </div>
+</details>
 
           <datalist id="exercise-suggestions"></datalist>
           <button id="btn-add-exercise">Add</button>
