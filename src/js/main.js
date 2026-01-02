@@ -21,7 +21,8 @@ listSessionExercises,
 deleteSessionExercise,
 listSets,
 insertSet,
-deleteSet
+deleteSet,
+setExerciseMeasurementType
 } from "./db.js";
 
 let selectedSessionId = null;
@@ -173,13 +174,28 @@ async function renderSelectedSessionExercises(sessionId) {
         ? `<div style="margin-top:6px; display:flex; flex-direction:column; gap:6px;">
             ${(r.sets || [])
               .map(s => {
-                const w = (s.weight === null || s.weight === undefined) ? "" : String(s.weight);
-                const reps = (s.reps === null || s.reps === undefined) ? "" : String(s.reps);
 
-                let label = `#${s.position}`;
-                if (w !== "" && reps !== "") label += ` — ${w}kg × ${reps}`;
-                else if (w !== "") label += ` — ${w}kg`;
-                else if (reps !== "") label += ` — ${reps} reps`;
+          const w = (s.weight === null || s.weight === undefined) ? "" : String(s.weight);
+          const reps = (s.reps === null || s.reps === undefined) ? "" : String(s.reps);
+          const duration = (s.duration_sec === null || s.duration_sec === undefined)
+            ? ""
+            : Number(s.duration_sec);
+
+          let label = `#${s.position}`;
+
+          if (r.measurement_type === "time_only") {
+            if (duration !== "") {
+              const mm = Math.floor(duration / 60);
+              const ss = String(duration % 60).padStart(2, "0");
+              label += ` — ${mm}:${ss}`;
+            } else {
+              label += " — time";
+            }
+          } else {
+            if (w !== "" && reps !== "") label += ` — ${w}kg × ${reps}`;
+            else if (w !== "") label += ` — ${w}kg`;
+            else if (reps !== "") label += ` — ${reps} reps`;
+          }
 
                 return `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
                   <div style="color:#333;">${label}</div>
@@ -293,6 +309,35 @@ if (r.measurement_type === "time_only") {
       return;
     }
 
+    if (action === "add-time-set") {
+      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+      const dEl = container.querySelector(`input[data-duration-for="${sessionExerciseId}"]`);
+const durationRaw = (dEl?.value ?? "").trim();
+logLine("🧪 add-time-set", { sessionExerciseId, durationRaw });
+
+      const durationSec = durationRaw === "" ? null : Number(durationRaw);
+      if (durationRaw !== "" && (!Number.isFinite(durationSec) || durationSec < 0)) {
+        logLine("⚠️ Invalid seconds value.");
+        return;
+      }
+
+      await insertSet({
+        sessionExerciseId,
+        duration_sec: durationSec,
+        weight: null,
+        weight_unit: null,
+        reps: null,
+        distance_m: null,
+        assisted: 0,
+        notes: null
+      });
+
+      if (dEl) dEl.value = "";
+      await renderSelectedSessionExercises(sessionId);
+      return;
+    }
+
+
     if (action === "delete-set") {
       const setId = Number(btn.getAttribute("data-setid"));
       await deleteSet(setId);
@@ -376,7 +421,6 @@ if (platform === "web") {
 
 await initDb(logLine);
 
-
 try {
   await seedExercisesFromCsv(logLine);
   const ex = await listExercises(5);
@@ -384,6 +428,9 @@ try {
 } catch (e) {
   logLine("⚠️ Exercise seed/list failed (non-fatal):", String(e));
 }
+
+// Phase G — semantic correction (idempotent)
+await setExerciseMeasurementType("Bike", "time_only");
 
     // Default date
     const dateInput = document.getElementById("session-date");

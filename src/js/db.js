@@ -90,6 +90,20 @@ try {
   }
 }
 
+// Phase G — semantic correction: Bike is time-based
+try {
+  await db.run(
+    `UPDATE exercises
+     SET measurement_type = 'time_only'
+     WHERE name = 'Bike'
+       AND (measurement_type IS NULL OR measurement_type = 'weight_reps');`
+  );
+  if (typeof log === "function") log("✅ Phase G: ensured Bike is time_only");
+} catch (e) {
+  const msg = String(e || "").toLowerCase();
+  if (typeof log === "function") log("⚠️ Phase G warning (Bike semantics):", msg);
+}
+
     // -----------------------------
     // Session exercises (Phase B-1)
     // -----------------------------
@@ -302,6 +316,16 @@ export async function listExercises(limit = 500) {
   return res.values ?? [];
 }
 
+// Phase G — Exercise semantics
+export async function setExerciseMeasurementType(name, measurementType) {
+  await initDb();
+  await db.run(
+    `UPDATE exercises SET measurement_type = ? WHERE name = ?`,
+    [measurementType, name]
+  );
+}
+
+
 export async function deleteSessionExercise(sessionExerciseId) {
   const conn = await initDb(() => {});
   await conn.run(`DELETE FROM session_exercises WHERE id = ?;`, [sessionExerciseId]);
@@ -358,7 +382,18 @@ export async function listSessions(limit = 20) {
 export async function listSets(sessionExerciseId) {
   await initDb();
   const res = await db.query(
-    `SELECT id, session_exercise_id, position, weight, reps, notes
+    `SELECT
+      id,
+      session_exercise_id,
+      position,
+      weight,
+      weight_unit,
+      reps,
+      duration_sec,
+      distance_m,
+      assisted,
+      notes,
+      created_at
      FROM sets
      WHERE session_exercise_id = ?
      ORDER BY position ASC, id ASC;`,
@@ -379,21 +414,62 @@ async function getNextSetPosition(sessionExerciseId) {
   return row ? Number(row.nextPos) : 1;
 }
 
-export async function insertSet({ sessionExerciseId, weight, reps, notes = null }) {
+export async function insertSet({
+  sessionExerciseId,
+  weight = null,
+  weight_unit = null,
+  reps = null,
+  duration_sec = null,
+  distance_m = null,
+  assisted = 0,
+  notes = null
+}) {
   await initDb();
   const position = await getNextSetPosition(sessionExerciseId);
 
   const w = (weight === "" || weight === undefined || weight === null) ? null : Number(weight);
+  const wu = (weight_unit === "" || weight_unit === undefined || weight_unit === null) ? null : String(weight_unit);
+
   const r = (reps === "" || reps === undefined || reps === null) ? null : Number(reps);
+  const dsec = (duration_sec === "" || duration_sec === undefined || duration_sec === null) ? null : Number(duration_sec);
+  const dm = (distance_m === "" || distance_m === undefined || distance_m === null) ? null : Number(distance_m);
+
+  const a = assisted ? 1 : 0;
+
   const n = (notes === "" || notes === undefined || notes === null) ? null : String(notes);
 
+  const now = Date.now();
+
   const result = await db.run(
-    `INSERT INTO sets (session_exercise_id, position, weight, reps, notes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?);`,
-    [sessionExerciseId, position, w, r, n, Date.now()]
+    `INSERT INTO sets (
+        session_exercise_id,
+        position,
+        weight,
+        weight_unit,
+        reps,
+        duration_sec,
+        distance_m,
+        assisted,
+        notes,
+        created_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+    [sessionExerciseId, position, w, wu, r, dsec, dm, a, n, now]
   );
 
-  return { id: result.lastId, session_exercise_id: sessionExerciseId, position, weight: w, reps: r, notes: n };
+  return {
+    id: result.lastId,
+    session_exercise_id: sessionExerciseId,
+    position,
+    weight: w,
+    weight_unit: wu,
+    reps: r,
+    duration_sec: dsec,
+    distance_m: dm,
+    assisted: a,
+    notes: n,
+    created_at: now
+  };
 }
 
 export async function deleteSet(setId) {
