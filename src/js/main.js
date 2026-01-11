@@ -612,12 +612,23 @@ async function safeStart() {
           logLine("⚠️ No active session to finish.");
           return;
         }
+        logLine("🟦 Finishing session...", activeId);
         await finishSession(activeId, logLine);
-        stopRestTimer(); // stop if running
-        setSelectedSessionUI(null);
+        stopRestTimer();
+
+        logLine("🟦 Resetting UI to home-view...");
         selectedSessionId = null;
+        setSelectedSessionUI(null);
+
+        // Manual override just in case
+        const hv = document.getElementById("home-view");
+        const sv = document.getElementById("session-view");
+        if (hv) hv.style.display = "block";
+        if (sv) sv.style.display = "none";
+
         await renderSelectedSessionExercises(null);
         await refreshSessionsList();
+        logLine("✅ Session finished and returned home.");
       } catch (e) {
         logLine("❌ Finish session failed:", String(e));
         if (e?.stack) logLine(e.stack);
