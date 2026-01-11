@@ -129,8 +129,11 @@ function setSelectedSessionUI(session) {
   if (sessionView) sessionView.style.display = "block";
 
   selectedEl.innerHTML = `
-    <div><strong>${session.focus.toUpperCase()}</strong> — ${session.date}</div>
-    <div class="muted">Status: ${session.status}</div>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <div style="font-family: 'Montserrat', sans-serif; font-size: 20px; font-weight: 700;">${session.focus.toUpperCase()}</div>
+      <div class="badge ${session.status === 'active' ? 'active' : 'finished'}">${session.status}</div>
+    </div>
+    <div class="muted" style="margin-top: 4px;">${session.date}</div>
     ${session.notes ? `<div class="muted">Notes: ${session.notes}</div>` : ""}
   `;
 
@@ -156,7 +159,7 @@ async function refreshSessionsList() {
         <span class="badge ${badge}">${s.status}</span>
       </div>
       ${s.notes ? `<div class="muted">${s.notes}</div>` : ""}
-      <div style="margin-top:10px;" class="row">
+      <div class="row" style="margin-top: 8px;">
         <button class="linkbtn tiny" data-open="${s.id}">Open</button>
         <button class="danger tiny" data-delete="${s.id}">Delete</button>
       </div>
@@ -207,7 +210,7 @@ async function renderSelectedSessionExercises(sessionId) {
   const rows = await listSessionExercises(sessionId);
 
   if (!rows.length) {
-    container.innerHTML = `<div style="color:#777;">No exercises added yet.</div>`;
+    container.innerHTML = `<div class="muted">No exercises added yet.</div>`;
     return;
   }
 
@@ -221,13 +224,12 @@ async function renderSelectedSessionExercises(sessionId) {
 
   container.innerHTML = rowsDetailed
     .map(r => {
-      const note = r.notes ? ` <span style="color:#777;">— ${r.notes}</span>` : "";
+      const note = r.notes ? ` <span class="muted">— ${r.notes}</span>` : "";
 
       const setsHtml = (r.sets || []).length
-        ? `<div style="margin-top:6px; display:flex; flex-direction:column; gap:6px;">
+        ? `<div class="sets-container" style="margin-top: 8px;">
             ${(r.sets || [])
           .map(s => {
-
             const w = (s.weight === null || s.weight === undefined) ? "" : String(s.weight);
             const reps = (s.reps === null || s.reps === undefined) ? "" : String(s.reps);
             const duration = (s.duration_sec === null || s.duration_sec === undefined)
@@ -259,109 +261,111 @@ async function renderSelectedSessionExercises(sessionId) {
               else if (reps !== "") label += ` — ${reps} reps`;
             }
 
-            return `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-                  <div style="color:#333;">${label}</div>
-                  <button data-action="delete-set" data-setid="${s.id}" style="border:1px solid #ddd; background:#fff; padding:4px 8px; border-radius:8px;">🗑</button>
+            return `<div class="set-row">
+                  <div>${label}</div>
+                  <button class="danger tiny" data-action="delete-set" data-setid="${s.id}">🗑</button>
                 </div>`;
           })
           .join("")}
           </div>`
-        : `<div style="margin-top:6px; color:#777;">No sets yet.</div>`;
+        : `<div class="muted" style="margin-top: 6px;">No sets yet.</div>`;
 
       let addRow = "";
 
       if (r.measurement_type === "time_only") {
         addRow = `
-    <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
+    <div class="row" style="margin-top: 10px;">
       <input
         data-duration-for="${r.id}"
         inputmode="numeric"
         placeholder="seconds"
-        style="width:110px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+        style="width: 120px;"
       />
       <button
         data-action="add-time-set"
         data-seid="${r.id}"
-        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        class="tiny">
         + Set
       </button>
     </div>
   `;
       } else if (r.measurement_type === "cardio") {
         addRow = `
-    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+    <div class="row" style="margin-top: 10px;">
       <input
         data-duration-for="${r.id}"
         inputmode="numeric"
-        placeholder="seconds"
-        style="width:100px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+        placeholder="sec"
+        style="width: 80px;"
       />
       <input
         data-distance-for="${r.id}"
         inputmode="numeric"
-        placeholder="meters"
-        style="width:100px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+        placeholder="m"
+        style="width: 80px;"
       />
       <button
         data-action="add-cardio-set"
         data-seid="${r.id}"
-        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        class="tiny">
         + Cardio
       </button>
     </div>
   `;
       } else if (r.measurement_type === "notes_only") {
         addRow = `
-    <div style="margin-top:8px; color:#777;">
+    <div class="muted" style="margin-top: 8px;">
       Notes only — no sets for this exercise.
     </div>
   `;
       } else {
         // DEFAULT: weight + reps (this is your existing UI, preserved)
         addRow = `
-    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+    <div class="row" style="margin-top: 10px;">
       <input
         data-weight-for="${r.id}"
         inputmode="decimal"
         placeholder="kg"
-        style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+        style="width: 70px;"
       />
       <input
         data-reps-for="${r.id}"
         inputmode="numeric"
         placeholder="reps"
-        style="width:70px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+        style="width: 80px;"
       />
 
       <button
         data-action="add-set"
         data-seid="${r.id}"
-        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        class="tiny">
         + Set
       </button>
 
       <button
         data-action="repeat-set"
         data-seid="${r.id}"
-        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
-        ↻ Repeat
+        class="linkbtn tiny">
+        ↻
       </button>
 
       <button
         data-action="delete-exercise"
         data-seid="${r.id}"
-        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
-        ✖ Remove
+        class="danger tiny">
+        ✖
       </button>
     </div>
   `;
       }
 
-      return `<div style="padding:10px 0; border-bottom:1px solid #eee;">
-        <div>
-          <strong>${r.exercise_name}</strong>
-          ${r.pb ? ` <span class="badge" style="background:#fff4e6; border:1px solid #ffd8a8; color:#d9480f;">PB: ${r.pb}kg</span>` : ""}
-          ${note}
+      return `<div class="exercise-item">
+        <div class="exercise-header">
+          <div>
+            <strong>${r.exercise_name}</strong>
+            ${note}
+          </div>
+          ${r.pb ? `<span class="badge pb-badge">PB: ${r.pb}kg</span>` : ""}
         </div>
         ${setsHtml}
         ${addRow}
@@ -698,11 +702,11 @@ async function safeStart() {
           }
 
           listDiv.style.display = "block";
-          listDiv.innerHTML = filtered.slice(0, 10) // Limit to 10 for performance
+          listDiv.innerHTML = filtered.slice(0, 10)
             .map(e => `
               <button type="button"
                 data-name="${e.name.replace(/"/g, "&quot;")}"
-                style="display:block;width:100%;text-align:left;padding:12px;border:0;border-bottom:1px solid #eee;background:white;cursor:pointer;">
+                class="search-item">
                 ${e.name}
               </button>
             `)
