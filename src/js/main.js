@@ -8,7 +8,7 @@ import {
   createSession,
   listSessions,
   getSessionDetail,
-preloadTemplateExercises,
+  preloadTemplateExercises,
   getActiveSessionId,
   setActiveSessionId,
   clearActiveSessionId,
@@ -16,18 +16,24 @@ preloadTemplateExercises,
   deleteSession,
   seedExercisesFromCsv,
   listExercises,
-addExerciseToSession,
-listSessionExercises,
-deleteSessionExercise,
-listSets,
-insertSet,
-deleteSet,
-setExerciseMeasurementType
+  addExerciseToSession,
+  listSessionExercises,
+  deleteSessionExercise,
+  listSets,
+  insertSet,
+  deleteSet,
+  setExerciseMeasurementType,
+  getLatestSetForExercise,
+  getPersonalBest
 } from "./db.js";
 
 let selectedSessionId = null;
 
 const logEl = document.getElementById("log");
+
+// Timer State
+let timerInterval = null;
+let timerSeconds = 90;
 
 function logLine(...args) {
   const msg = args
@@ -47,6 +53,50 @@ window.onunhandledrejection = (event) => {
   if (event.reason?.stack) logLine(event.reason.stack);
 };
 
+/* --------------------------------------------------
+   Rest Timer
+-------------------------------------------------- */
+function startRestTimer() {
+  const container = document.getElementById("rest-timer-container");
+  const display = document.getElementById("rest-timer-display");
+  if (!container || !display) return;
+
+  stopRestTimer(); // reset if running
+
+  timerSeconds = 90;
+  container.style.display = "block";
+
+  const updateDisplay = () => {
+    const mm = Math.floor(timerSeconds / 60);
+    const ss = String(timerSeconds % 60).padStart(2, "0");
+    display.textContent = `${String(mm).padStart(2, '0')}:${ss}`;
+  };
+
+  updateDisplay();
+
+  timerInterval = setInterval(() => {
+    timerSeconds--;
+    if (timerSeconds < 0) {
+      stopRestTimer();
+      // Optional: sound or vibration
+      if (Capacitor.isNativePlatform()) {
+        // Haptics.vibrate() or similar
+      }
+      return;
+    }
+    updateDisplay();
+  }, 1000);
+}
+
+function stopRestTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+  const container = document.getElementById("rest-timer-container");
+  if (container) container.style.display = "none";
+}
+
 function todayISO() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -56,6 +106,8 @@ function todayISO() {
 }
 
 function setSelectedSessionUI(session) {
+  const homeView = document.getElementById("home-view");
+  const sessionView = document.getElementById("session-view");
   const selectedEl = document.getElementById("selected-session");
   const finishBtn = document.getElementById("btn-finish-session");
   const exerciseControls = document.getElementById("exercise-controls");
@@ -64,12 +116,17 @@ function setSelectedSessionUI(session) {
   if (!selectedEl) return;
 
   if (!session) {
+    if (homeView) homeView.style.display = "block";
+    if (sessionView) sessionView.style.display = "none";
     selectedEl.textContent = "No session selected.";
     if (finishBtn) finishBtn.style.display = "none";
     if (exerciseControls) exerciseControls.style.display = "none";
     if (exercisesEl) exercisesEl.innerHTML = "";
     return;
   }
+
+  if (homeView) homeView.style.display = "none";
+  if (sessionView) sessionView.style.display = "block";
 
   selectedEl.innerHTML = `
     <div><strong>${session.focus.toUpperCase()}</strong> — ${session.date}</div>
@@ -79,11 +136,6 @@ function setSelectedSessionUI(session) {
 
   if (finishBtn) finishBtn.style.display = session.status === "active" ? "inline-block" : "none";
   if (exerciseControls) exerciseControls.style.display = "block";
-
-  // Phase A only: no exercises UI yet
-  if (exercisesEl) {
-    exercisesEl.innerHTML = `<div class="muted">Phase A only: exercises UI will come back after session lifecycle is stable.</div>`;
-  }
 }
 
 async function refreshSessionsList() {
@@ -112,20 +164,20 @@ async function refreshSessionsList() {
 
     sessionsEl.appendChild(div);
 
-div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", async () => {
-  // Only mark active if the session is actually active
-  if (s.status === "active") {
-    await setActiveSessionId(s.id);
-  }
+    div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", async () => {
+      // Only mark active if the session is actually active
+      if (s.status === "active") {
+        await setActiveSessionId(s.id);
+      }
 
-  selectedSessionId = s.id;
-  const detail = await getSessionDetail(s.id);
-  setSelectedSessionUI(detail);
+      selectedSessionId = s.id;
+      const detail = await getSessionDetail(s.id);
+      setSelectedSessionUI(detail);
 
-  await renderSelectedSessionExercises(s.id);
+      await renderSelectedSessionExercises(s.id);
 
-  logLine(`✅ Opened session id=${s.id}`);
-});
+      logLine(`✅ Opened session id=${s.id}`);
+    });
 
     div.querySelector(`[data-delete="${s.id}"]`).addEventListener("click", async () => {
       await deleteSession(s.id, logLine);
@@ -133,7 +185,7 @@ div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", async () =>
       const activeId = await getActiveSessionId();
       if (String(activeId) === String(s.id)) {
         await clearActiveSessionId();
-selectedSessionId = null; 
+        selectedSessionId = null;
         setSelectedSessionUI(null);
       }
       await refreshSessionsList();
@@ -159,57 +211,67 @@ async function renderSelectedSessionExercises(sessionId) {
     return;
   }
 
-  // Load sets for each session_exercise (MVP: N+1 queries, fine)
-  const rowsWithSets = [];
+  // Load sets & PB for each session_exercise
+  const rowsDetailed = [];
   for (const r of rows) {
     const sets = await listSets(r.id);
-    rowsWithSets.push({ ...r, sets });
+    const pb = await getPersonalBest(r.exercise_name);
+    rowsDetailed.push({ ...r, sets, pb });
   }
 
-  container.innerHTML = rowsWithSets
+  container.innerHTML = rowsDetailed
     .map(r => {
       const note = r.notes ? ` <span style="color:#777;">— ${r.notes}</span>` : "";
 
       const setsHtml = (r.sets || []).length
         ? `<div style="margin-top:6px; display:flex; flex-direction:column; gap:6px;">
             ${(r.sets || [])
-              .map(s => {
+          .map(s => {
 
-          const w = (s.weight === null || s.weight === undefined) ? "" : String(s.weight);
-          const reps = (s.reps === null || s.reps === undefined) ? "" : String(s.reps);
-          const duration = (s.duration_sec === null || s.duration_sec === undefined)
-            ? ""
-            : Number(s.duration_sec);
+            const w = (s.weight === null || s.weight === undefined) ? "" : String(s.weight);
+            const reps = (s.reps === null || s.reps === undefined) ? "" : String(s.reps);
+            const duration = (s.duration_sec === null || s.duration_sec === undefined)
+              ? ""
+              : Number(s.duration_sec);
 
-          let label = `#${s.position}`;
+            let label = `#${s.position}`;
 
-          if (r.measurement_type === "time_only") {
-            if (duration !== "") {
-              const mm = Math.floor(duration / 60);
-              const ss = String(duration % 60).padStart(2, "0");
-              label += ` — ${mm}:${ss}`;
+            if (r.measurement_type === "time_only") {
+              if (duration !== "") {
+                const mm = Math.floor(duration / 60);
+                const ss = String(duration % 60).padStart(2, "0");
+                label += ` — ${mm}:${ss}`;
+              } else {
+                label += " — time";
+              }
+            } else if (r.measurement_type === "cardio") {
+              const dist = (s.distance_m === null || s.distance_m === undefined) ? "NA" : `${s.distance_m}m`;
+              if (duration !== "") {
+                const mm = Math.floor(duration / 60);
+                const ss = String(duration % 60).padStart(2, "0");
+                label += ` — ${mm}:${ss}, ${dist}`;
+              } else {
+                label += ` — time, ${dist}`;
+              }
             } else {
-              label += " — time";
+              if (w !== "" && reps !== "") label += ` — ${w}kg × ${reps}`;
+              else if (w !== "") label += ` — ${w}kg`;
+              else if (reps !== "") label += ` — ${reps} reps`;
             }
-          } else {
-            if (w !== "" && reps !== "") label += ` — ${w}kg × ${reps}`;
-            else if (w !== "") label += ` — ${w}kg`;
-            else if (reps !== "") label += ` — ${reps} reps`;
-          }
 
-                return `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+            return `<div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
                   <div style="color:#333;">${label}</div>
                   <button data-action="delete-set" data-setid="${s.id}" style="border:1px solid #ddd; background:#fff; padding:4px 8px; border-radius:8px;">🗑</button>
                 </div>`;
-              })
-              .join("")}
+          })
+          .join("")}
           </div>`
         : `<div style="margin-top:6px; color:#777;">No sets yet.</div>`;
 
-let addRow = "";
+      let addRow = "";
 
-if (r.measurement_type === "time_only") {
-  addRow = `
+      if (r.measurement_type === "time_only") {
+        addRow = `
     <div style="margin-top:8px; display:flex; gap:8px; align-items:center;">
       <input
         data-duration-for="${r.id}"
@@ -225,15 +287,38 @@ if (r.measurement_type === "time_only") {
       </button>
     </div>
   `;
-} else if (r.measurement_type === "notes_only") {
-  addRow = `
+      } else if (r.measurement_type === "cardio") {
+        addRow = `
+    <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <input
+        data-duration-for="${r.id}"
+        inputmode="numeric"
+        placeholder="seconds"
+        style="width:100px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+      />
+      <input
+        data-distance-for="${r.id}"
+        inputmode="numeric"
+        placeholder="meters"
+        style="width:100px; padding:8px; border-radius:8px; border:1px solid #ccc;"
+      />
+      <button
+        data-action="add-cardio-set"
+        data-seid="${r.id}"
+        style="padding:8px 12px; border-radius:10px; border:1px solid #ddd; background:#fff;">
+        + Cardio
+      </button>
+    </div>
+  `;
+      } else if (r.measurement_type === "notes_only") {
+        addRow = `
     <div style="margin-top:8px; color:#777;">
       Notes only — no sets for this exercise.
     </div>
   `;
-} else {
-  // DEFAULT: weight + reps (this is your existing UI, preserved)
-  addRow = `
+      } else {
+        // DEFAULT: weight + reps (this is your existing UI, preserved)
+        addRow = `
     <div style="margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
       <input
         data-weight-for="${r.id}"
@@ -270,10 +355,14 @@ if (r.measurement_type === "time_only") {
       </button>
     </div>
   `;
-}
+      }
 
       return `<div style="padding:10px 0; border-bottom:1px solid #eee;">
-        <div><strong>${r.exercise_name}</strong>${note}</div>
+        <div>
+          <strong>${r.exercise_name}</strong>
+          ${r.pb ? ` <span class="badge" style="background:#fff4e6; border:1px solid #ffd8a8; color:#d9480f;">PB: ${r.pb}kg</span>` : ""}
+          ${note}
+        </div>
         ${setsHtml}
         ${addRow}
       </div>`;
@@ -305,6 +394,8 @@ if (r.measurement_type === "time_only") {
       if (wEl) wEl.value = "";
       if (rEl) rEl.value = "";
 
+      startRestTimer();
+
       await renderSelectedSessionExercises(sessionId);
       return;
     }
@@ -312,8 +403,8 @@ if (r.measurement_type === "time_only") {
     if (action === "add-time-set") {
       const sessionExerciseId = Number(btn.getAttribute("data-seid"));
       const dEl = container.querySelector(`input[data-duration-for="${sessionExerciseId}"]`);
-const durationRaw = (dEl?.value ?? "").trim();
-logLine("🧪 add-time-set", { sessionExerciseId, durationRaw });
+      const durationRaw = (dEl?.value ?? "").trim();
+      logLine("🧪 add-time-set", { sessionExerciseId, durationRaw });
 
       const durationSec = durationRaw === "" ? null : Number(durationRaw);
       if (durationRaw !== "" && (!Number.isFinite(durationSec) || durationSec < 0)) {
@@ -333,10 +424,40 @@ logLine("🧪 add-time-set", { sessionExerciseId, durationRaw });
       });
 
       if (dEl) dEl.value = "";
+
+      startRestTimer();
+
       await renderSelectedSessionExercises(sessionId);
       return;
     }
 
+    if (action === "add-cardio-set") {
+      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+      const dEl = container.querySelector(`input[data-duration-for="${sessionExerciseId}"]`);
+      const distEl = container.querySelector(`input[data-distance-for="${sessionExerciseId}"]`);
+
+      const durationRaw = (dEl?.value ?? "").trim();
+      const distanceRaw = (distEl?.value ?? "").trim();
+
+      const durationSec = durationRaw === "" ? null : Number(durationRaw);
+      const distanceM = distanceRaw === "" ? null : Number(distanceRaw);
+
+      await insertSet({
+        sessionExerciseId,
+        duration_sec: durationSec,
+        distance_m: distanceM,
+        weight: null,
+        reps: null,
+        notes: null
+      });
+
+      if (dEl) dEl.value = "";
+      if (distEl) distEl.value = "";
+
+      startRestTimer();
+      await renderSelectedSessionExercises(sessionId);
+      return;
+    }
 
     if (action === "delete-set") {
       const setId = Number(btn.getAttribute("data-setid"));
@@ -345,47 +466,50 @@ logLine("🧪 add-time-set", { sessionExerciseId, durationRaw });
       return;
     }
 
-  if (action === "repeat-set") {
-    try {
-      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
-      logLine("🟦 repeat-set clicked:", { sessionExerciseId });
+    if (action === "repeat-set") {
+      try {
+        const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+        logLine("🟦 repeat-set clicked:", { sessionExerciseId });
 
-      const sets = await listSets(sessionExerciseId);
-      if (!sets.length) {
-        logLine("⚠️ No sets to repeat for this exercise.");
-        return;
+        const sets = await listSets(sessionExerciseId);
+        if (!sets.length) {
+          logLine("⚠️ No sets to repeat for this exercise.");
+          return;
+        }
+
+        const last = sets[sets.length - 1];
+        await insertSet({
+          sessionExerciseId,
+          weight: last.weight,
+          reps: last.reps,
+          notes: last.notes || null,
+        });
+
+        logLine("✅ Repeated last set:", { weight: last.weight, reps: last.reps });
+
+        startRestTimer();
+
+        await renderSelectedSessionExercises(selectedSessionId);
+      } catch (e) {
+        logLine("❌ repeat-set failed:", String(e));
+        if (e?.stack) logLine(e.stack);
       }
-
-      const last = sets[sets.length - 1];
-      await insertSet({
-        sessionExerciseId,
-        weight: last.weight,
-        reps: last.reps,
-        notes: last.notes || null,
-      });
-
-      logLine("✅ Repeated last set:", { weight: last.weight, reps: last.reps });
-      await renderSelectedSessionExercises(selectedSessionId);
-    } catch (e) {
-      logLine("❌ repeat-set failed:", String(e));
-      if (e?.stack) logLine(e.stack);
     }
-  }
 
-  if (action === "delete-exercise") {
-    try {
-      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
-      logLine("🟦 delete-exercise clicked:", { sessionExerciseId });
+    if (action === "delete-exercise") {
+      try {
+        const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+        logLine("🟦 delete-exercise clicked:", { sessionExerciseId });
 
-      await deleteSessionExercise(sessionExerciseId);
+        await deleteSessionExercise(sessionExerciseId);
 
-      logLine("✅ Removed exercise from session_exercises:", { sessionExerciseId });
-      await renderSelectedSessionExercises(selectedSessionId);
-    } catch (e) {
-      logLine("❌ delete-exercise failed:", String(e));
-      if (e?.stack) logLine(e.stack);
+        logLine("✅ Removed exercise from session_exercises:", { sessionExerciseId });
+        await renderSelectedSessionExercises(selectedSessionId);
+      } catch (e) {
+        logLine("❌ delete-exercise failed:", String(e));
+        if (e?.stack) logLine(e.stack);
+      }
     }
-  }
 
   };
 }
@@ -412,25 +536,25 @@ async function safeStart() {
   try {
     logLine("✅ JS loaded (Phase A: session lifecycle)");
 
-const platform = Capacitor.getPlatform();
-logLine("Platform:", platform);
+    const platform = Capacitor.getPlatform();
+    logLine("Platform:", platform);
 
-if (platform === "web") {
-  await initSqliteWeb(logLine);
-}
+    if (platform === "web") {
+      await initSqliteWeb(logLine);
+    }
 
-await initDb(logLine);
+    await initDb(logLine);
 
-try {
-  await seedExercisesFromCsv(logLine);
-  const ex = await listExercises(5);
-  logLine("✅ Sample exercises:", ex.map(x => x.name));
-} catch (e) {
-  logLine("⚠️ Exercise seed/list failed (non-fatal):", String(e));
-}
+    try {
+      await seedExercisesFromCsv(logLine);
+      const ex = await listExercises(5);
+      logLine("✅ Sample exercises:", ex.map(x => x.name));
+    } catch (e) {
+      logLine("⚠️ Exercise seed/list failed (non-fatal):", String(e));
+    }
 
-// Phase G — semantic correction (idempotent)
-await setExerciseMeasurementType("Bike", "time_only");
+    // Phase G — semantic correction (idempotent)
+    await setExerciseMeasurementType("Bike", "time_only");
 
     // Default date
     const dateInput = document.getElementById("session-date");
@@ -440,46 +564,46 @@ await setExerciseMeasurementType("Bike", "time_only");
     const createBtn = document.getElementById("btn-create-session");
     const finishBtn = document.getElementById("btn-finish-session");
     const refreshBtn = document.getElementById("btn-refresh-sessions");
-const exportBtn  = document.getElementById("btn-export-data");
+    const exportBtn = document.getElementById("btn-export-data");
 
     if (!createBtn) logLine("❌ Missing #btn-create-session in DOM");
     if (!finishBtn) logLine("❌ Missing #btn-finish-session in DOM");
     if (!refreshBtn) logLine("❌ Missing #btn-refresh-sessions in DOM");
-if (!exportBtn) logLine("❌ Missing #btn-export-data in DOM");
+    if (!exportBtn) logLine("❌ Missing #btn-export-data in DOM");
 
-createBtn?.addEventListener("click", async () => {
-  try {
-    const date = document.getElementById("session-date")?.value || todayISO();
-    const focus = document.getElementById("session-focus")?.value || "other";
-    const notes = document.getElementById("session-notes")?.value || "";
+    createBtn?.addEventListener("click", async () => {
+      try {
+        const date = document.getElementById("session-date")?.value || todayISO();
+        const focus = document.getElementById("session-focus")?.value || "other";
+        const notes = document.getElementById("session-notes")?.value || "";
 
-    logLine("🟦 Create clicked:", { date, focus, notes });
+        logLine("🟦 Create clicked:", { date, focus, notes });
 
-    const id = await createSession({ date, focus, notes });
-selectedSessionId = id;
+        const id = await createSession({ date, focus, notes });
+        selectedSessionId = id;
 
-await preloadTemplateExercises(id, focus, logLine);
+        await preloadTemplateExercises(id, focus, logLine);
 
-    const detail = await getSessionDetail(id);
+        const detail = await getSessionDetail(id);
 
-    setSelectedSessionUI(detail);
-await renderSelectedSessionExercises(selectedSessionId);
-    await refreshSessionsList();
-  } catch (e) {
-    logLine("❌ Create session failed:", String(e));
-    if (e?.stack) logLine(e.stack);
-  }
-});
-
-exportBtn?.addEventListener("click", async () => {
-  try {
-    await exportAll({
-      log: typeof logLine === "function" ? logLine : undefined
+        setSelectedSessionUI(detail);
+        await renderSelectedSessionExercises(selectedSessionId);
+        await refreshSessionsList();
+      } catch (e) {
+        logLine("❌ Create session failed:", String(e));
+        if (e?.stack) logLine(e.stack);
+      }
     });
-  } catch (e) {
-    logLine("❌ Export failed:", String(e));
-  }
-});
+
+    exportBtn?.addEventListener("click", async () => {
+      try {
+        await exportAll({
+          log: typeof logLine === "function" ? logLine : undefined
+        });
+      } catch (e) {
+        logLine("❌ Export failed:", String(e));
+      }
+    });
 
     finishBtn?.addEventListener("click", async () => {
       try {
@@ -489,15 +613,19 @@ exportBtn?.addEventListener("click", async () => {
           return;
         }
         await finishSession(activeId, logLine);
-        const detail = await getSessionDetail(activeId);
-        setSelectedSessionUI(detail);
-selectedSessionId = null;
-await renderSelectedSessionExercises(null);       
- await refreshSessionsList();
+        stopRestTimer(); // stop if running
+        setSelectedSessionUI(null);
+        selectedSessionId = null;
+        await renderSelectedSessionExercises(null);
+        await refreshSessionsList();
       } catch (e) {
         logLine("❌ Finish session failed:", String(e));
         if (e?.stack) logLine(e.stack);
       }
+    });
+
+    document.getElementById("btn-stop-timer")?.addEventListener("click", () => {
+      stopRestTimer();
     });
 
     refreshBtn?.addEventListener("click", async () => {
@@ -511,14 +639,14 @@ await renderSelectedSessionExercises(null);
     // Load active session (if any)
     const activeId = await getActiveSessionId();
 
- if (activeId) {
-selectedSessionId = activeId;
+    if (activeId) {
+      selectedSessionId = activeId;
       const detail = await getSessionDetail(activeId);
       setSelectedSessionUI(detail);
-await renderSelectedSessionExercises(selectedSessionId);
+      await renderSelectedSessionExercises(selectedSessionId);
       logLine(`✅ Loaded active session id=${activeId}`);
     } else {
-selectedSessionId = null;
+      selectedSessionId = null;
       setSelectedSessionUI(null);
       logLine("ℹ️ No active session set.");
     }
@@ -533,86 +661,122 @@ selectedSessionId = null;
     }
 
     logLine("✅ Ready.");
-// -----------------------------
-// Exercise picker (tap-to-fill)
-// -----------------------------
-try {
-  const exerciseInput = document.getElementById("exercise-name");
-const searchInput = document.getElementById("exercise-picker-search");
-const listDiv = document.getElementById("exercise-picker-list");
+    // -----------------------------
+    // Unified Exercise Search
+    // -----------------------------
+    try {
+      const exerciseInput = document.getElementById("exercise-name");
+      const listDiv = document.getElementById("exercise-picker-list");
 
-  if (!exerciseInput || !searchInput || !listDiv) {
-    logLine("⚠️ Exercise picker elements not found; skipping picker UI");
-  } else {
-    const allExercises = await listExercises(1000);
+      if (!exerciseInput || !listDiv) {
+        logLine("⚠️ Unified exercise elements not found");
+      } else {
+        const allExercises = await listExercises(1000);
 
-    const render = (qRaw = "") => {
-      const q = String(qRaw).trim().toLowerCase();
-      const filtered = q
-        ? allExercises.filter(e => e.name.toLowerCase().includes(q))
-        : allExercises;
+        const renderResults = (qRaw = "") => {
+          const q = String(qRaw).trim().toLowerCase();
+          if (!q) {
+            listDiv.style.display = "none";
+            return;
+          }
 
-      // keep rendering lightweight
-      const show = filtered.slice(0, 120);
+          const filtered = allExercises.filter(e => e.name.toLowerCase().includes(q));
+          if (filtered.length === 0) {
+            listDiv.style.display = "none";
+            return;
+          }
 
-      listDiv.innerHTML = show
-        .map(e => `
-          <button type="button"
-            data-name="${e.name.replace(/"/g, "&quot;")}"
-            style="display:block;width:100%;text-align:left;padding:10px;border:0;border-bottom:1px solid #eee;background:white;cursor:pointer;">
-            ${e.name}
-          </button>
-        `)
-        .join("");
+          listDiv.style.display = "block";
+          listDiv.innerHTML = filtered.slice(0, 10) // Limit to 10 for performance
+            .map(e => `
+              <button type="button"
+                data-name="${e.name.replace(/"/g, "&quot;")}"
+                style="display:block;width:100%;text-align:left;padding:12px;border:0;border-bottom:1px solid #eee;background:white;cursor:pointer;">
+                ${e.name}
+              </button>
+            `)
+            .join("");
 
-      // click-to-fill
-      listDiv.querySelectorAll("button[data-name]").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const name = btn.getAttribute("data-name");
-          exerciseInput.value = name;
-          logLine("🟦 picked exercise:", name);
+          listDiv.querySelectorAll("button[data-name]").forEach(btn => {
+            btn.addEventListener("click", async () => {
+              const name = btn.getAttribute("data-name");
+              exerciseInput.value = name;
+              listDiv.style.display = "none";
+
+              // Suggest previous weight/reps
+              const lastSet = await getLatestSetForExercise(name);
+              if (lastSet) {
+                const pillsContainer = document.getElementById("recent-exercise-pills");
+                if (pillsContainer) {
+                  let label = "";
+                  if (lastSet.weight) label += `${lastSet.weight}kg `;
+                  if (lastSet.reps) label += `x ${lastSet.reps}`;
+                  if (lastSet.duration_sec) label += `(${Math.floor(lastSet.duration_sec / 60)}:${String(lastSet.duration_sec % 60).padStart(2, '0')})`;
+
+                  pillsContainer.innerHTML = `<button class="pill tiny" data-set='${JSON.stringify(lastSet)}'>Use last: ${label}</button>`;
+                  pillsContainer.querySelector("button")?.addEventListener("click", () => {
+                    // This pill logic will be handled below
+                  });
+                }
+              }
+            });
+          });
+        };
+
+        exerciseInput.addEventListener("input", () => renderResults(exerciseInput.value));
+
+        // Hide list when clicking outside
+        document.addEventListener("click", (e) => {
+          if (!exerciseInput.contains(e.target) && !listDiv.contains(e.target)) {
+            listDiv.style.display = "none";
+          }
         });
-      });
-    };
 
-    searchInput.addEventListener("input", () => render(searchInput.value));
-    render("");
-    logLine(`✅ Exercise picker ready (${allExercises.length} exercises)`);
-  }
-} catch (e) {
-  logLine("⚠️ Exercise picker failed (non-fatal):", String(e));
-}
+        // Handle suggested pill clicks
+        document.getElementById("recent-exercise-pills")?.addEventListener("click", (e) => {
+          const btn = e.target.closest("button[data-set]");
+          if (btn) {
+            const lastSet = JSON.parse(btn.getAttribute("data-set"));
+            logLine("🟦 Applied suggestion:", lastSet);
+            // We could auto-fill inputs here if we had specific ones, but session-exercise doesn't have them yet.
+            // Actually, we usually want these when adding SETS.
+          }
+        });
+      }
+    } catch (e) {
+      logLine("⚠️ Unified search failed:", String(e));
+    }
 
-// ---------------------------
-// Add exercise to session (Phase B-5)
-// ---------------------------
-const addBtn = document.getElementById("btn-add-exercise");
-const exerciseNameInput = document.getElementById("exercise-name");
-const exerciseNotesInput = document.getElementById("exercise-notes");
+    // ---------------------------
+    // Add exercise to session (Phase B-5)
+    // ---------------------------
+    const addBtn = document.getElementById("btn-add-exercise");
+    const exerciseNameInput = document.getElementById("exercise-name");
+    const exerciseNotesInput = document.getElementById("exercise-notes");
 
-addBtn?.addEventListener("click", async () => {
-  if (!selectedSessionId) {
-    logLine("⚠️ No active session");
-    return;
-  }
+    addBtn?.addEventListener("click", async () => {
+      if (!selectedSessionId) {
+        logLine("⚠️ No active session");
+        return;
+      }
 
-const name = exerciseNameInput.value.trim();
-  if (!name) return;
+      const name = exerciseNameInput.value.trim();
+      if (!name) return;
 
-  await addExerciseToSession(
-    selectedSessionId,
-    name,
-    exerciseNotesInput?.value || null
-  );
+      await addExerciseToSession(
+        selectedSessionId,
+        name,
+        exerciseNotesInput?.value || null
+      );
 
-await renderSelectedSessionExercises(selectedSessionId);
+      await renderSelectedSessionExercises(selectedSessionId);
 
-exerciseNameInput.value = "";
-if (exerciseNotesInput) exerciseNotesInput.value = "";
+      exerciseNameInput.value = "";
+      if (exerciseNotesInput) exerciseNotesInput.value = "";
 
-  await window.renderSessionExercises?.();
-  logLine("🟦 Exercise added:", name);
-});
+      await window.renderSessionExercises?.();
+      logLine("🟦 Exercise added:", name);
+    });
   } catch (e) {
     logLine("❌ safeStart crashed:", String(e));
     if (e?.stack) logLine(e.stack);

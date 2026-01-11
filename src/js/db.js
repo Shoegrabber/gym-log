@@ -20,7 +20,7 @@ export async function initDb(log) {
     // Optional: helps avoid weird “dangling” state on Android
     try {
       await sqlite.checkConnectionsConsistency();
-    } catch (_) {}
+    } catch (_) { }
 
     const conn = await sqlite.createConnection(
       DB_NAME,
@@ -60,7 +60,7 @@ export async function initDb(log) {
     // Exercises library (Phase B-0)
     // -----------------------------
 
-await db.execute(`
+    await db.execute(`
   CREATE TABLE IF NOT EXISTS exercises (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -69,40 +69,40 @@ await db.execute(`
   );
 `);
 
-// Phase G — Migration: add measurement_type to exercises
-try {
-  await db.execute(`
+    // Phase G — Migration: add measurement_type to exercises
+    try {
+      await db.execute(`
     ALTER TABLE exercises
     ADD COLUMN measurement_type TEXT NOT NULL DEFAULT 'weight_reps'
   `);
-  if (typeof log === "function") {
-    log("✅ Migration OK: added exercises.measurement_type");
-  }
-} catch (e) {
-  const msg = String(e || "").toLowerCase();
-  if (
-    !msg.includes("duplicate") &&
-    !msg.includes("already exists")
-  ) {
-    if (typeof log === "function") {
-      log("⚠️ Migration warning (measurement_type):", msg);
+      if (typeof log === "function") {
+        log("✅ Migration OK: added exercises.measurement_type");
+      }
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (
+        !msg.includes("duplicate") &&
+        !msg.includes("already exists")
+      ) {
+        if (typeof log === "function") {
+          log("⚠️ Migration warning (measurement_type):", msg);
+        }
+      }
     }
-  }
-}
 
-// Phase G — semantic correction: Bike is time-based
-try {
-  await db.run(
-    `UPDATE exercises
-     SET measurement_type = 'time_only'
-     WHERE name = 'Bike'
-       AND (measurement_type IS NULL OR measurement_type = 'weight_reps');`
-  );
-  if (typeof log === "function") log("✅ Phase G: ensured Bike is time_only");
-} catch (e) {
-  const msg = String(e || "").toLowerCase();
-  if (typeof log === "function") log("⚠️ Phase G warning (Bike semantics):", msg);
-}
+    // Phase G — semantic correction: Cardio exercises
+    try {
+      await db.run(
+        `UPDATE exercises
+         SET measurement_type = 'cardio'
+         WHERE (name = 'Bike' OR name = 'Treadmill' OR name = 'Trademill' OR name = 'Run')
+           AND (measurement_type IS NULL OR measurement_type = 'weight_reps' OR measurement_type = 'time_only');`
+      );
+      if (typeof log === "function") log("✅ Phase G: ensured cardio exercises are measurement_type=cardio");
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (typeof log === "function") log("⚠️ Phase G warning (cardio semantics):", msg);
+    }
 
     // -----------------------------
     // Session exercises (Phase B-1)
@@ -118,34 +118,34 @@ try {
       );
     `);
 
-// Phase E — Migration: add ordering column to session_exercises (position)
-// Must run AFTER table exists, safe to run multiple times
-try {
-  await db.execute(`
+    // Phase E — Migration: add ordering column to session_exercises (position)
+    // Must run AFTER table exists, safe to run multiple times
+    try {
+      await db.execute(`
     ALTER TABLE session_exercises
     ADD COLUMN position INTEGER NOT NULL DEFAULT 0
   `);
-  if (typeof log === "function") {
-    log("✅ Migration OK: added session_exercises.position");
-  }
-} catch (e) {
-  // Ignore duplicate-column errors (already migrated)
-  const msg = String(e || "").toLowerCase();
-  if (
-    !msg.includes("duplicate") &&
-    !msg.includes("already exists")
-  ) {
-    if (typeof log === "function") {
-      log("⚠️ Migration warning (position):", msg);
+      if (typeof log === "function") {
+        log("✅ Migration OK: added session_exercises.position");
+      }
+    } catch (e) {
+      // Ignore duplicate-column errors (already migrated)
+      const msg = String(e || "").toLowerCase();
+      if (
+        !msg.includes("duplicate") &&
+        !msg.includes("already exists")
+      ) {
+        if (typeof log === "function") {
+          log("⚠️ Migration warning (position):", msg);
+        }
+      }
     }
-  }
-}
 
     // -----------------------------
     // Sets (Phase C)
     // -----------------------------
 
-await db.execute(`
+    await db.execute(`
   CREATE TABLE IF NOT EXISTS sets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_exercise_id INTEGER NOT NULL,
@@ -162,51 +162,51 @@ await db.execute(`
   );
 `);
 
-// Phase G — Migration: extend sets for semantics
+    // Phase G — Migration: extend sets for semantics
 
-// 1) weight_unit
-try {
-  await db.execute(`ALTER TABLE sets ADD COLUMN weight_unit TEXT NULL`);
-  if (typeof log === "function") log("✅ Migration OK: added sets.weight_unit");
-} catch (e) {
-  const msg = String(e || "").toLowerCase();
-  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
-    if (typeof log === "function") log("⚠️ Migration warning (sets.weight_unit):", msg);
-  }
-}
+    // 1) weight_unit
+    try {
+      await db.execute(`ALTER TABLE sets ADD COLUMN weight_unit TEXT NULL`);
+      if (typeof log === "function") log("✅ Migration OK: added sets.weight_unit");
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+        if (typeof log === "function") log("⚠️ Migration warning (sets.weight_unit):", msg);
+      }
+    }
 
-// 2) duration_sec
-try {
-  await db.execute(`ALTER TABLE sets ADD COLUMN duration_sec INTEGER NULL`);
-  if (typeof log === "function") log("✅ Migration OK: added sets.duration_sec");
-} catch (e) {
-  const msg = String(e || "").toLowerCase();
-  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
-    if (typeof log === "function") log("⚠️ Migration warning (sets.duration_sec):", msg);
-  }
-}
+    // 2) duration_sec
+    try {
+      await db.execute(`ALTER TABLE sets ADD COLUMN duration_sec INTEGER NULL`);
+      if (typeof log === "function") log("✅ Migration OK: added sets.duration_sec");
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+        if (typeof log === "function") log("⚠️ Migration warning (sets.duration_sec):", msg);
+      }
+    }
 
-// 3) distance_m
-try {
-  await db.execute(`ALTER TABLE sets ADD COLUMN distance_m REAL NULL`);
-  if (typeof log === "function") log("✅ Migration OK: added sets.distance_m");
-} catch (e) {
-  const msg = String(e || "").toLowerCase();
-  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
-    if (typeof log === "function") log("⚠️ Migration warning (sets.distance_m):", msg);
-  }
-}
+    // 3) distance_m
+    try {
+      await db.execute(`ALTER TABLE sets ADD COLUMN distance_m REAL NULL`);
+      if (typeof log === "function") log("✅ Migration OK: added sets.distance_m");
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+        if (typeof log === "function") log("⚠️ Migration warning (sets.distance_m):", msg);
+      }
+    }
 
-// 4) assisted
-try {
-  await db.execute(`ALTER TABLE sets ADD COLUMN assisted INTEGER NOT NULL DEFAULT 0`);
-  if (typeof log === "function") log("✅ Migration OK: added sets.assisted");
-} catch (e) {
-  const msg = String(e || "").toLowerCase();
-  if (!msg.includes("duplicate") && !msg.includes("already exists")) {
-    if (typeof log === "function") log("⚠️ Migration warning (sets.assisted):", msg);
-  }
-}
+    // 4) assisted
+    try {
+      await db.execute(`ALTER TABLE sets ADD COLUMN assisted INTEGER NOT NULL DEFAULT 0`);
+      if (typeof log === "function") log("✅ Migration OK: added sets.assisted");
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+        if (typeof log === "function") log("⚠️ Migration warning (sets.assisted):", msg);
+      }
+    }
 
     await db.execute(`
       CREATE INDEX IF NOT EXISTS idx_sets_session_exercise_id
@@ -327,7 +327,7 @@ export async function setExerciseMeasurementType(name, measurementType) {
 
 
 export async function deleteSessionExercise(sessionExerciseId) {
-  const conn = await initDb(() => {});
+  const conn = await initDb(() => { });
   await conn.run(`DELETE FROM session_exercises WHERE id = ?;`, [sessionExerciseId]);
 }
 
@@ -400,6 +400,39 @@ export async function listSets(sessionExerciseId) {
     [sessionExerciseId]
   );
   return res.values ?? [];
+}
+
+/**
+ * Returns the most recent set for a given exercise name,
+ * looking across all previous sessions.
+ */
+export async function getLatestSetForExercise(exerciseName) {
+  await initDb();
+  const res = await db.query(
+    `SELECT s.*
+     FROM sets s
+     JOIN session_exercises se ON s.session_exercise_id = se.id
+     WHERE se.exercise_name = ?
+     ORDER BY s.created_at DESC
+     LIMIT 1`,
+    [exerciseName]
+  );
+  return res.values?.[0] ?? null;
+}
+
+/**
+ * Returns the personal best (max weight) for a given exercise name.
+ */
+export async function getPersonalBest(exerciseName) {
+  await initDb();
+  const res = await db.query(
+    `SELECT MAX(weight) as pb
+     FROM sets s
+     JOIN session_exercises se ON s.session_exercise_id = se.id
+     WHERE se.exercise_name = ?`,
+    [exerciseName]
+  );
+  return res.values?.[0]?.pb ?? null;
 }
 
 async function getNextSetPosition(sessionExerciseId) {

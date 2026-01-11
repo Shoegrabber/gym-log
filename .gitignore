@@ -19,3 +19,5 @@ npm-debug.log*
 # Android Studio / IntelliJ
 android/.idea/
 *.iml
+
+src/public/exercise_guidance_links.csv

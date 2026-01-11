@@ -30,92 +30,88 @@
     <h1>Gym Log</h1>
     <p class="sub">Log fast. Review later.</p>
 
-    <!-- Create session -->
-    <div class="section">
-      <h2>Create session</h2>
-      <div class="row">
-        <input id="session-date" type="date" />
-        <select id="session-focus">
-          <option value="push">Push</option>
-          <option value="pull">Pull</option>
-          <option value="legs">Legs</option>
-          <option value="mixed">Mixed</option>
-          <option value="cardio">Cardio</option>
-          <option value="other">Other</option>
-        </select>
+    <!-- Home View (Hidden during active session) -->
+    <div id="home-view">
+      <!-- Create session -->
+      <div class="section">
+        <h2>Create session</h2>
+        <div class="row">
+          <input id="session-date" type="date" />
+          <select id="session-focus">
+            <option value="push">Push</option>
+            <option value="pull">Pull</option>
+            <option value="legs">Legs</option>
+            <option value="mixed">Mixed</option>
+            <option value="cardio">Cardio</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <input id="session-notes" type="text" placeholder="notes (optional)" style="flex:1;" />
+          <button id="btn-create-session">Create</button>
+        </div>
+        <!-- Export lives on home screen, not during a session -->
+        <div class="row" style="margin-top:10px;">
+          <button id="btn-export-data">Export Data (CSV + JSON)</button>
+        </div>
       </div>
-      <div class="row" style="margin-top:10px;">
-        <input id="session-notes" type="text" placeholder="notes (optional)" style="flex:1;" />
-        <button id="btn-create-session">Create</button>
-      </div>
- <!-- Export lives on home screen, not during a session -->
-<div class="row" style="margin-top:10px;">
-  <button id="btn-export-data">Export Data (CSV + JSON)</button>
-</div>
-   </div>
 
-    <!-- Selected session FIRST -->
-    <div class="section">
-      <h2>Selected session</h2>
+      <!-- Recent sessions below -->
+      <div class="section">
+        <details id="recent-sessions">
+          <summary>Recent sessions</summary>
+          <div style="margin-top:10px;">
+            <button id="btn-refresh-sessions" class="linkbtn">Refresh list</button>
+          </div>
+          <div id="sessions" style="margin-top:10px;"></div>
+        </details>
+      </div>
+    </div>
+
+    <!-- Selected session (Session View) -->
+    <div class="section" id="session-view">
+      <h2>Active session</h2>
       <div id="selected-session" class="muted">No session selected.</div>
+
+      <!-- Rest Timer -->
+      <div id="rest-timer-container" style="display:none; margin-top:14px; padding:12px; background:#f0f7ff; border:1px solid #cce3ff; border-radius:12px; text-align:center;">
+        <div class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:1px;">Rest Timer</div>
+        <div id="rest-timer-display" style="font-size:32px; font-weight:bold; color:#0056b3;">01:30</div>
+        <button id="btn-stop-timer" class="tiny" style="margin-top:8px;">Stop</button>
+      </div>
 
       <div style="margin-top:10px;">
         <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
       </div>
 
-      <!-- Suggestions (used for Mixed/Cardio) -->
-      <div id="session-suggestions" style="display:none; margin-top:12px;">
-        <div class="muted" style="margin-bottom:6px;">Suggestions (optional)</div>
-        <div id="suggestion-pills" class="row" style="gap:8px;"></div>
-      </div>
-
       <div id="exercise-controls" style="display:none; margin-top:14px;">
         <h3 style="margin:0 0 8px;">Add exercise</h3>
-
-        <div class="row" style="margin-top:10px;">
-          <input id="exercise-name" list="exercise-suggestions" type="text" placeholder="exercise name (e.g., RDL)" style="flex:1;" />
-
-<details id="exercise-picker-details" style="margin-top:8px;">
-  <summary class="muted">Search / pick from library</summary>
-
-  <div id="exercise-picker" style="margin-top:8px; width:100%;">
-    <input
-      id="exercise-picker-search"
-      type="text"
-      placeholder="tap list or search (e.g., squat)"
-      style="width:100%; padding:8px; box-sizing:border-box;"
-    />
-    <div
-      id="exercise-picker-list"
-      style="max-height:140px; overflow:auto; border:1px solid #ddd; border-radius:8px; margin-top:8px;"
-    ></div>
-  </div>
-</details>
-
-          <datalist id="exercise-suggestions"></datalist>
-          <button id="btn-add-exercise">Add</button>
+        
+        <div id="unified-exercise-entry" style="position:relative;">
+          <div class="row">
+            <input 
+              id="exercise-name" 
+              type="text" 
+              placeholder="Search or enter exercise name..." 
+              style="flex:1;" 
+              autocomplete="off"
+            />
+            <button id="btn-add-exercise">Add</button>
+          </div>
+          
+          <!-- Unified Search Results -->
+          <div id="exercise-picker-list" style="display:none; position:absolute; top:100%; left:0; right:0; z-index:100; max-height:200px; overflow:auto; border:1px solid #ddd; border-radius:8px; background:white; box-shadow:0 4px 12px rgba(0,0,0,0.1); margin-top:4px;"></div>
         </div>
 
         <div class="row" style="margin-top:10px;">
           <input id="exercise-notes" type="text" placeholder="exercise notes (optional)" style="flex:1;" />
         </div>
 
-        <div class="muted" style="margin-top:10px;">Recent:</div>
+        <div class="muted" style="margin-top:10px;">Suggested:</div>
         <div id="recent-exercise-pills" class="row" style="gap:8px; margin-top:6px;"></div>
       </div>
 
       <div id="exercises" style="margin-top:12px;"></div>
-    </div>
-
-    <!-- Recent sessions below -->
-    <div class="section">
-      <details id="recent-sessions" open>
-        <summary>Recent sessions</summary>
-        <div style="margin-top:10px;">
-          <button id="btn-refresh-sessions" class="linkbtn">Refresh list</button>
-        </div>
-        <div id="sessions" style="margin-top:10px;"></div>
-      </details>
     </div>
 
     <!-- Status -->
