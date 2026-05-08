@@ -1,5 +1,6 @@
 import { CapacitorSQLite, SQLiteConnection } from "@capacitor-community/sqlite";
 import { Capacitor } from "@capacitor/core";
+import { TEMPLATES, UNILATERAL_EXERCISES } from "./templates.js";
 
 const DB_NAME = "gym_log";
 const DB_VERSION = 1;
@@ -86,6 +87,24 @@ export async function initDb(log) {
       ) {
         if (typeof log === "function") {
           log("⚠️ Migration warning (measurement_type):", msg);
+        }
+      }
+    }
+
+    // Phase H — Migration: add is_unilateral to exercises
+    try {
+      await db.execute(`
+    ALTER TABLE exercises
+    ADD COLUMN is_unilateral INTEGER NOT NULL DEFAULT 0
+  `);
+      if (typeof log === "function") {
+        log("✅ Migration OK: added exercises.is_unilateral");
+      }
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+        if (typeof log === "function") {
+          log("⚠️ Migration warning (is_unilateral):", msg);
         }
       }
     }
@@ -208,6 +227,17 @@ export async function initDb(log) {
       }
     }
 
+    // Phase H — Migration: add side to sets (NULL/L/R for unilateral exercises)
+    try {
+      await db.execute(`ALTER TABLE sets ADD COLUMN side TEXT NULL`);
+      if (typeof log === "function") log("✅ Migration OK: added sets.side");
+    } catch (e) {
+      const msg = String(e || "").toLowerCase();
+      if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+        if (typeof log === "function") log("⚠️ Migration warning (sets.side):", msg);
+      }
+    }
+
     await db.execute(`
       CREATE INDEX IF NOT EXISTS idx_sets_session_exercise_id
       ON sets(session_exercise_id);
@@ -246,9 +276,12 @@ export async function clearActiveSessionId() {
    Exercise seed helpers (Phase B-0)
 -------------------------------------------------- */
 
+const SEED_KEY = "seed_exercises_v2";
+
 async function hasSeededExercises() {
   const res = await db.query(
-    `SELECT value FROM app_state WHERE key='seed_exercises_v1'`
+    `SELECT value FROM app_state WHERE key=?`,
+    [SEED_KEY]
   );
   return res.values?.[0]?.value === "1";
 }
@@ -256,7 +289,8 @@ async function hasSeededExercises() {
 async function setSeededExercises() {
   await db.run(
     `INSERT OR REPLACE INTO app_state (key, value)
-     VALUES ('seed_exercises_v1', '1')`
+     VALUES (?, '1')`,
+    [SEED_KEY]
   );
 }
 
@@ -265,6 +299,7 @@ export async function seedExercisesFromCsv(log) {
 
   if (await hasSeededExercises()) {
     if (typeof log === "function") log("ℹ️ exercises seed already applied");
+    await markUnilateralExercises(log);
     return;
   }
 
@@ -296,6 +331,8 @@ export async function seedExercisesFromCsv(log) {
     }
 
     await setSeededExercises();
+    await markUnilateralExercises(log);
+
     if (typeof log === "function") {
       log(`✅ Seeded exercises from CSV (${rows.length} rows)`);
     }
@@ -304,6 +341,18 @@ export async function seedExercisesFromCsv(log) {
       log("❌ seedExercisesFromCsv failed:", String(e));
     }
     throw e;
+  }
+}
+
+async function markUnilateralExercises(log) {
+  for (const name of UNILATERAL_EXERCISES) {
+    await db.run(
+      `UPDATE exercises SET is_unilateral = 1 WHERE name = ?`,
+      [name]
+    );
+  }
+  if (typeof log === "function") {
+    log(`✅ Marked ${UNILATERAL_EXERCISES.length} unilateral exercises`);
   }
 }
 
@@ -392,6 +441,7 @@ export async function listSets(sessionExerciseId) {
       duration_sec,
       distance_m,
       assisted,
+      side,
       notes,
       created_at
      FROM sets
@@ -455,6 +505,7 @@ export async function insertSet({
   duration_sec = null,
   distance_m = null,
   assisted = 0,
+  side = null,
   notes = null
 }) {
   await initDb();
@@ -468,6 +519,7 @@ export async function insertSet({
   const dm = (distance_m === "" || distance_m === undefined || distance_m === null) ? null : Number(distance_m);
 
   const a = assisted ? 1 : 0;
+  const sd = (side === "" || side === undefined || side === null) ? null : String(side).toUpperCase();
 
   const n = (notes === "" || notes === undefined || notes === null) ? null : String(notes);
 
@@ -483,11 +535,12 @@ export async function insertSet({
         duration_sec,
         distance_m,
         assisted,
+        side,
         notes,
         created_at
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-    [sessionExerciseId, position, w, wu, r, dsec, dm, a, n, now]
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+    [sessionExerciseId, position, w, wu, r, dsec, dm, a, sd, n, now]
   );
 
   return {
@@ -500,6 +553,7 @@ export async function insertSet({
     duration_sec: dsec,
     distance_m: dm,
     assisted: a,
+    side: sd,
     notes: n,
     created_at: now
   };
@@ -547,7 +601,8 @@ export async function listSessionExercises(sessionId) {
     `
     SELECT
       se.*,
-      e.measurement_type
+      e.measurement_type,
+      e.is_unilateral
     FROM session_exercises se
     LEFT JOIN exercises e
       ON e.name = se.exercise_name
@@ -574,8 +629,6 @@ export async function deleteSession(sessionId, log) {
 // --------------------------------------------------
 // Phase E — Template preload
 // --------------------------------------------------
-import { TEMPLATES } from "./templates.js";
-
 export async function preloadTemplateExercises(sessionId, focus, log) {
   await initDb();
 
@@ -587,14 +640,17 @@ export async function preloadTemplateExercises(sessionId, focus, log) {
     return;
   }
 
+  // New shape: tpl.exercises = [{ name, ... }, ...]
+  // Legacy shape: tpl.anchors + tpl.suggested = [name, ...]
+  let names;
+  if (Array.isArray(tpl.exercises)) {
+    names = tpl.exercises.map(e => e.name);
+  } else {
+    names = [...(tpl.anchors || []), ...(tpl.suggested || [])];
+  }
+
   let position = 0;
-
-  const all = [
-    ...(tpl.anchors || []),
-    ...(tpl.suggested || []),
-  ];
-
-  for (const name of all) {
+  for (const name of names) {
     await db.run(
       `INSERT INTO session_exercises
        (session_id, exercise_name, position, created_at)
@@ -604,6 +660,6 @@ export async function preloadTemplateExercises(sessionId, focus, log) {
   }
 
   if (typeof log === "function") {
-    log(`✅ Preloaded ${all.length} template exercises for ${focus}`);
+    log(`✅ Preloaded ${names.length} template exercises for ${focus}`);
   }
 }
