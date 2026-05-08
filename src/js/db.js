@@ -588,10 +588,20 @@ export async function finishSession(sessionId, log) {
 export async function addExerciseToSession(sessionId, exerciseName, notes = null) {
   await initDb();
   const now = Date.now();
+  const trimmedName = String(exerciseName).trim();
+
+  // Persist to catalog so freshly-typed exercises show up in future
+  // searches (no-op if already present).
+  await db.run(
+    `INSERT OR IGNORE INTO exercises (name, created_at)
+     VALUES (?, ?)`,
+    [trimmedName, now]
+  );
+
   await db.run(
     `INSERT INTO session_exercises (session_id, exercise_name, notes, created_at)
      VALUES (?, ?, ?, ?)`,
-    [sessionId, String(exerciseName).trim(), notes ? String(notes).trim() : null, now]
+    [sessionId, trimmedName, notes ? String(notes).trim() : null, now]
   );
 }
 

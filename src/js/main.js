@@ -28,6 +28,10 @@ import {
 } from "./db.js";
 
 let selectedSessionId = null;
+// Tracks the session_exercise the user most recently logged a set on,
+// so we can float it to the top of the list (keeps the active exercise
+// next to the rest timer). Reset when leaving a session.
+let lastActiveSessionExerciseId = null;
 
 const logEl = document.getElementById("log");
 
@@ -191,6 +195,7 @@ async function refreshSessionsList() {
       }
 
       selectedSessionId = s.id;
+      lastActiveSessionExerciseId = null;
       const detail = await getSessionDetail(s.id);
       setSelectedSessionUI(detail);
 
@@ -231,12 +236,24 @@ async function renderSelectedSessionExercises(sessionId) {
     return;
   }
 
-  // Load sets & PB for each session_exercise
+  // Load sets, PB, and last-ever set for each session_exercise.
+  // lastSet is used to pre-fill the next set's inputs as a recommendation.
   const rowsDetailed = [];
   for (const r of rows) {
     const sets = await listSets(r.id);
     const pb = await getPersonalBest(r.exercise_name);
-    rowsDetailed.push({ ...r, sets, pb });
+    const lastSet = await getLatestSetForExercise(r.exercise_name);
+    rowsDetailed.push({ ...r, sets, pb, lastSet });
+  }
+
+  // Float the last-active exercise to the top so it stays visible next
+  // to the rest timer while the user is mid-rest.
+  if (lastActiveSessionExerciseId != null) {
+    const idx = rowsDetailed.findIndex(r => r.id === lastActiveSessionExerciseId);
+    if (idx > 0) {
+      const [active] = rowsDetailed.splice(idx, 1);
+      rowsDetailed.unshift(active);
+    }
   }
 
   container.innerHTML = rowsDetailed
@@ -252,8 +269,10 @@ async function renderSelectedSessionExercises(sessionId) {
             const duration = (s.duration_sec === null || s.duration_sec === undefined)
               ? ""
               : Number(s.duration_sec);
+            const unit = s.weight_unit === "lbs" ? "lbs" : "kg";
 
             let label = `#${s.position}`;
+            if (s.side) label += ` ${s.side}`;
 
             if (r.measurement_type === "time_only") {
               if (duration !== "") {
@@ -273,8 +292,8 @@ async function renderSelectedSessionExercises(sessionId) {
                 label += ` — time, ${dist}`;
               }
             } else {
-              if (w !== "" && reps !== "") label += ` — ${w}kg × ${reps}`;
-              else if (w !== "") label += ` — ${w}kg`;
+              if (w !== "" && reps !== "") label += ` — ${w}${unit} × ${reps}`;
+              else if (w !== "") label += ` — ${w}${unit}`;
               else if (reps !== "") label += ` — ${reps} reps`;
             }
 
@@ -336,28 +355,38 @@ async function renderSelectedSessionExercises(sessionId) {
     </div>
   `;
       } else {
-        // DEFAULT: weight + reps (this is your existing UI, preserved)
+        // DEFAULT: weight + reps. Pre-fill last-ever weight/reps as
+        // a starting recommendation. Show L/R buttons for unilateral
+        // exercises so each side is logged as its own set.
+        const lastW = (r.lastSet?.weight !== null && r.lastSet?.weight !== undefined)
+          ? String(r.lastSet.weight) : "";
+        const lastR = (r.lastSet?.reps !== null && r.lastSet?.reps !== undefined)
+          ? String(r.lastSet.reps) : "";
+        const lastUnit = r.lastSet?.weight_unit === "lbs" ? "lbs" : "kg";
+
+        const setBtns = r.is_unilateral
+          ? `<button data-action="add-set" data-seid="${r.id}" data-side="L" class="tiny">+ L</button>
+             <button data-action="add-set" data-seid="${r.id}" data-side="R" class="tiny">+ R</button>`
+          : `<button data-action="add-set" data-seid="${r.id}" class="tiny">+ Set</button>`;
+
         addRow = `
     <div class="row" style="margin-top: 10px;">
       <input
         data-weight-for="${r.id}"
         inputmode="decimal"
-        placeholder="kg"
+        placeholder="${lastUnit}"
+        value="${lastW}"
         style="width: 70px;"
       />
       <input
         data-reps-for="${r.id}"
         inputmode="numeric"
         placeholder="reps"
+        value="${lastR}"
         style="width: 80px;"
       />
 
-      <button
-        data-action="add-set"
-        data-seid="${r.id}"
-        class="tiny">
-        + Set
-      </button>
+      ${setBtns}
 
       <button
         data-action="repeat-set"
@@ -399,6 +428,7 @@ async function renderSelectedSessionExercises(sessionId) {
 
     if (action === "add-set") {
       const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+      const side = btn.getAttribute("data-side") || null;
       const wEl = container.querySelector(`input[data-weight-for="${sessionExerciseId}"]`);
       const rEl = container.querySelector(`input[data-reps-for="${sessionExerciseId}"]`);
 
@@ -409,12 +439,14 @@ async function renderSelectedSessionExercises(sessionId) {
         sessionExerciseId,
         weight: weightRaw === "" ? null : weightRaw,
         reps: repsRaw === "" ? null : repsRaw,
+        side,
         notes: null
       });
 
-      if (wEl) wEl.value = "";
-      if (rEl) rEl.value = "";
+      // Inputs intentionally NOT cleared: pre-fill of last-set values
+      // re-asserts on next render anyway, so clearing would just flicker.
 
+      lastActiveSessionExerciseId = sessionExerciseId;
       startRestTimer();
 
       await renderSelectedSessionExercises(sessionId);
@@ -446,6 +478,7 @@ async function renderSelectedSessionExercises(sessionId) {
 
       if (dEl) dEl.value = "";
 
+      lastActiveSessionExerciseId = sessionExerciseId;
       startRestTimer();
 
       await renderSelectedSessionExercises(sessionId);
@@ -475,6 +508,7 @@ async function renderSelectedSessionExercises(sessionId) {
       if (dEl) dEl.value = "";
       if (distEl) distEl.value = "";
 
+      lastActiveSessionExerciseId = sessionExerciseId;
       startRestTimer();
       await renderSelectedSessionExercises(sessionId);
       return;
@@ -502,12 +536,15 @@ async function renderSelectedSessionExercises(sessionId) {
         await insertSet({
           sessionExerciseId,
           weight: last.weight,
+          weight_unit: last.weight_unit,
           reps: last.reps,
+          side: last.side,
           notes: last.notes || null,
         });
 
-        logLine("✅ Repeated last set:", { weight: last.weight, reps: last.reps });
+        logLine("✅ Repeated last set:", { weight: last.weight, reps: last.reps, side: last.side });
 
+        lastActiveSessionExerciseId = sessionExerciseId;
         startRestTimer();
 
         await renderSelectedSessionExercises(selectedSessionId);
@@ -639,6 +676,7 @@ async function safeStart() {
 
         logLine("🟦 Resetting UI to home-view...");
         selectedSessionId = null;
+        lastActiveSessionExerciseId = null;
         setSelectedSessionUI(null);
 
         // Manual override just in case
@@ -707,15 +745,15 @@ async function safeStart() {
       if (!exerciseInput || !listDiv) {
         logLine("⚠️ Unified exercise elements not found");
       } else {
-        const allExercises = await listExercises(1000);
-
-        const renderResults = (qRaw = "") => {
+        const renderResults = async (qRaw = "") => {
           const q = String(qRaw).trim().toLowerCase();
           if (!q) {
             listDiv.style.display = "none";
             return;
           }
 
+          // Fresh query each time so newly-added exercises appear without reload.
+          const allExercises = await listExercises(1000);
           const filtered = allExercises.filter(e => e.name.toLowerCase().includes(q));
           if (filtered.length === 0) {
             listDiv.style.display = "none";
