@@ -564,6 +564,75 @@ export async function deleteSet(setId) {
   await db.run(`DELETE FROM sets WHERE id = ?;`, [setId]);
 }
 
+export async function updateSet(setId, fields) {
+  await initDb();
+  const allowed = ["weight", "weight_unit", "reps", "duration_sec", "distance_m", "side", "notes"];
+  const cols = [];
+  const vals = [];
+  for (const k of allowed) {
+    if (Object.prototype.hasOwnProperty.call(fields, k)) {
+      cols.push(`${k} = ?`);
+      const v = fields[k];
+      vals.push(v === "" || v === undefined ? null : v);
+    }
+  }
+  if (!cols.length) return;
+  vals.push(setId);
+  await db.run(`UPDATE sets SET ${cols.join(", ")} WHERE id = ?`, vals);
+}
+
+/**
+ * Returns total volume (Σ weight × reps) for a session, in kg.
+ * lbs sets are converted to kg before summing.
+ */
+export async function getSessionVolume(sessionId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT s.weight, s.reps, s.weight_unit
+     FROM sets s
+     JOIN session_exercises se ON s.session_exercise_id = se.id
+     WHERE se.session_id = ?
+       AND s.weight IS NOT NULL
+       AND s.reps IS NOT NULL`,
+    [sessionId]
+  );
+  let total = 0;
+  for (const row of res.values ?? []) {
+    const w = Number(row.weight);
+    const r = Number(row.reps);
+    if (!Number.isFinite(w) || !Number.isFinite(r)) continue;
+    const kg = row.weight_unit === "lbs" ? w * 0.45359237 : w;
+    total += kg * r;
+  }
+  return Math.round(total);
+}
+
+/**
+ * Returns true if the user's most recent prior session for this
+ * exercise had at least 3 sets all with reps ≥ 12 — a heuristic
+ * cue to bump the load next time.
+ */
+export async function shouldSuggestRaise(exerciseName, currentSessionId) {
+  await initDb();
+  const seRes = await db.query(
+    `SELECT id FROM session_exercises
+     WHERE exercise_name = ? AND session_id != ?
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [exerciseName, currentSessionId]
+  );
+  const seId = seRes.values?.[0]?.id;
+  if (!seId) return false;
+
+  const setRes = await db.query(
+    `SELECT reps FROM sets WHERE session_exercise_id = ? ORDER BY position ASC`,
+    [seId]
+  );
+  const reps = (setRes.values ?? []).map(r => Number(r.reps)).filter(n => Number.isFinite(n));
+  if (reps.length < 3) return false;
+  return reps.every(r => r >= 12);
+}
+
 export async function getSessionDetail(sessionId) {
   await initDb();
   const res = await db.query(`SELECT * FROM sessions WHERE id = ?`, [sessionId]);

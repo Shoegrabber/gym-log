@@ -22,9 +22,12 @@ import {
   listSets,
   insertSet,
   deleteSet,
+  updateSet,
   setExerciseMeasurementType,
   getLatestSetForExercise,
-  getPersonalBest
+  getPersonalBest,
+  getSessionVolume,
+  shouldSuggestRaise
 } from "./db.js";
 
 let selectedSessionId = null;
@@ -236,14 +239,16 @@ async function renderSelectedSessionExercises(sessionId) {
     return;
   }
 
-  // Load sets, PB, and last-ever set for each session_exercise.
-  // lastSet is used to pre-fill the next set's inputs as a recommendation.
+  // Load sets, PB, last-ever set, and raise-suggestion flag per exercise.
+  // lastSet pre-fills the next-set inputs; suggestRaise hints when last
+  // session hit ≥12 reps on every set.
   const rowsDetailed = [];
   for (const r of rows) {
     const sets = await listSets(r.id);
     const pb = await getPersonalBest(r.exercise_name);
     const lastSet = await getLatestSetForExercise(r.exercise_name);
-    rowsDetailed.push({ ...r, sets, pb, lastSet });
+    const suggestRaise = await shouldSuggestRaise(r.exercise_name, sessionId);
+    rowsDetailed.push({ ...r, sets, pb, lastSet, suggestRaise });
   }
 
   // Float the last-active exercise to the top so it stays visible next
@@ -255,6 +260,11 @@ async function renderSelectedSessionExercises(sessionId) {
       rowsDetailed.unshift(active);
     }
   }
+
+  const volume = await getSessionVolume(sessionId);
+  const volumeHtml = volume > 0
+    ? `<div class="session-volume" style="margin-top:14px; padding:10px; text-align:center; opacity:0.75; font-size:13px;">Total volume: ${volume.toLocaleString()} kg</div>`
+    : "";
 
   container.innerHTML = rowsDetailed
     .map(r => {
@@ -297,8 +307,32 @@ async function renderSelectedSessionExercises(sessionId) {
               else if (reps !== "") label += ` — ${reps} reps`;
             }
 
-            return `<div class="set-row">
-                  <div>${label}</div>
+            // Edit form is only offered for weight_reps sets; time/cardio
+            // are simpler to delete-and-re-add.
+            const editable = r.measurement_type !== "time_only" && r.measurement_type !== "cardio";
+            const sideOpts = `
+              <option value="" ${!s.side ? "selected" : ""}>—</option>
+              <option value="L" ${s.side === "L" ? "selected" : ""}>L</option>
+              <option value="R" ${s.side === "R" ? "selected" : ""}>R</option>
+            `;
+            const editForm = editable ? `
+              <div class="set-edit" data-edit-form="${s.id}" style="display:none; gap:6px; flex-wrap:wrap;">
+                <input data-edit-weight="${s.id}" inputmode="decimal" value="${w}" style="width:60px;" />
+                <select data-edit-unit="${s.id}" style="width:56px;">
+                  <option value="kg" ${unit === "kg" ? "selected" : ""}>kg</option>
+                  <option value="lbs" ${unit === "lbs" ? "selected" : ""}>lbs</option>
+                </select>
+                <input data-edit-reps="${s.id}" inputmode="numeric" value="${reps}" style="width:60px;" />
+                ${r.is_unilateral ? `<select data-edit-side="${s.id}" style="width:56px;">${sideOpts}</select>` : ""}
+                <button class="tiny" data-action="save-edit" data-setid="${s.id}">✓</button>
+                <button class="tiny" data-action="cancel-edit" data-setid="${s.id}">✗</button>
+              </div>
+            ` : "";
+
+            return `<div class="set-row" data-set-row="${s.id}">
+                  <div data-set-label="${s.id}">${label}</div>
+                  ${editForm}
+                  ${editable ? `<button class="linkbtn tiny" data-action="edit-set" data-setid="${s.id}">✎</button>` : ""}
                   <button class="danger tiny" data-action="delete-set" data-setid="${s.id}">🗑</button>
                 </div>`;
           })
@@ -355,9 +389,10 @@ async function renderSelectedSessionExercises(sessionId) {
     </div>
   `;
       } else {
-        // DEFAULT: weight + reps. Pre-fill last-ever weight/reps as
-        // a starting recommendation. Show L/R buttons for unilateral
-        // exercises so each side is logged as its own set.
+        // DEFAULT: weight + reps. Pre-fill last-ever values as a
+        // starting recommendation. The unit defaults to whatever was
+        // used last for this exercise (so lbs machines stay lbs).
+        // Unilateral exercises show + L and + R instead of + Set.
         const lastW = (r.lastSet?.weight !== null && r.lastSet?.weight !== undefined)
           ? String(r.lastSet.weight) : "";
         const lastR = (r.lastSet?.reps !== null && r.lastSet?.reps !== undefined)
@@ -374,16 +409,20 @@ async function renderSelectedSessionExercises(sessionId) {
       <input
         data-weight-for="${r.id}"
         inputmode="decimal"
-        placeholder="${lastUnit}"
+        placeholder="weight"
         value="${lastW}"
-        style="width: 70px;"
+        style="width: 60px;"
       />
+      <select data-weight-unit-for="${r.id}" style="width: 56px;">
+        <option value="kg" ${lastUnit === "kg" ? "selected" : ""}>kg</option>
+        <option value="lbs" ${lastUnit === "lbs" ? "selected" : ""}>lbs</option>
+      </select>
       <input
         data-reps-for="${r.id}"
         inputmode="numeric"
         placeholder="reps"
         value="${lastR}"
-        style="width: 80px;"
+        style="width: 60px;"
       />
 
       ${setBtns}
@@ -405,6 +444,10 @@ async function renderSelectedSessionExercises(sessionId) {
   `;
       }
 
+      const raiseHint = r.suggestRaise
+        ? `<div class="muted" style="margin-top:4px; font-size:12px;">💪 Last session was 12+ on every set — try a heavier load.</div>`
+        : "";
+
       return `<div class="exercise-item">
         <div class="exercise-header">
           <div>
@@ -413,11 +456,12 @@ async function renderSelectedSessionExercises(sessionId) {
           </div>
           ${r.pb ? `<span class="badge pb-badge">PB: ${r.pb}kg</span>` : ""}
         </div>
+        ${raiseHint}
         ${setsHtml}
         ${addRow}
       </div>`;
     })
-    .join("");
+    .join("") + volumeHtml;
 
   // Event delegation (overwrite per render; simple + reliable)
   container.onclick = async (ev) => {
@@ -431,13 +475,16 @@ async function renderSelectedSessionExercises(sessionId) {
       const side = btn.getAttribute("data-side") || null;
       const wEl = container.querySelector(`input[data-weight-for="${sessionExerciseId}"]`);
       const rEl = container.querySelector(`input[data-reps-for="${sessionExerciseId}"]`);
+      const uEl = container.querySelector(`select[data-weight-unit-for="${sessionExerciseId}"]`);
 
       const weightRaw = (wEl?.value ?? "").trim();
       const repsRaw = (rEl?.value ?? "").trim();
+      const weight_unit = uEl?.value === "lbs" ? "lbs" : "kg";
 
       await insertSet({
         sessionExerciseId,
         weight: weightRaw === "" ? null : weightRaw,
+        weight_unit,
         reps: repsRaw === "" ? null : repsRaw,
         side,
         notes: null
@@ -517,6 +564,45 @@ async function renderSelectedSessionExercises(sessionId) {
     if (action === "delete-set") {
       const setId = Number(btn.getAttribute("data-setid"));
       await deleteSet(setId);
+      await renderSelectedSessionExercises(sessionId);
+      return;
+    }
+
+    if (action === "edit-set") {
+      const setId = btn.getAttribute("data-setid");
+      const label = container.querySelector(`[data-set-label="${setId}"]`);
+      const form = container.querySelector(`[data-edit-form="${setId}"]`);
+      if (label) label.style.display = "none";
+      if (form) form.style.display = "flex";
+      btn.style.display = "none";
+      return;
+    }
+
+    if (action === "cancel-edit") {
+      // Re-render restores original values from the DB.
+      await renderSelectedSessionExercises(sessionId);
+      return;
+    }
+
+    if (action === "save-edit") {
+      const setId = Number(btn.getAttribute("data-setid"));
+      const wEl = container.querySelector(`[data-edit-weight="${setId}"]`);
+      const uEl = container.querySelector(`[data-edit-unit="${setId}"]`);
+      const rEl = container.querySelector(`[data-edit-reps="${setId}"]`);
+      const sideEl = container.querySelector(`[data-edit-side="${setId}"]`);
+
+      const weightRaw = (wEl?.value ?? "").trim();
+      const repsRaw = (rEl?.value ?? "").trim();
+      const sideRaw = sideEl ? (sideEl.value || null) : undefined;
+
+      const fields = {
+        weight: weightRaw === "" ? null : Number(weightRaw),
+        weight_unit: uEl?.value === "lbs" ? "lbs" : "kg",
+        reps: repsRaw === "" ? null : Number(repsRaw),
+      };
+      if (sideRaw !== undefined) fields.side = sideRaw;
+
+      await updateSet(setId, fields);
       await renderSelectedSessionExercises(sessionId);
       return;
     }
