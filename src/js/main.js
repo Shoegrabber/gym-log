@@ -31,9 +31,10 @@ let selectedSessionId = null;
 
 const logEl = document.getElementById("log");
 
-// Timer State
-let timerInterval = null;
-let timerSeconds = 90;
+// Timer State (wall-clock based — survives app backgrounding)
+const REST_TIMER_DEFAULT_SEC = 90;
+let timerEndAt = null;        // Date.now() target ms; null = no timer
+let timerTickInterval = null; // periodic render handle
 
 function logLine(...args) {
   const msg = args
@@ -54,48 +55,64 @@ window.onunhandledrejection = (event) => {
 };
 
 /* --------------------------------------------------
-   Rest Timer
+   Rest Timer (wall-clock based)
+   Tracks an absolute end timestamp so backgrounding
+   the app does not pause the countdown — when the
+   user returns, the elapsed real time is reflected.
 -------------------------------------------------- */
-function startRestTimer() {
+function startRestTimer(seconds = REST_TIMER_DEFAULT_SEC) {
   const container = document.getElementById("rest-timer-container");
-  const display = document.getElementById("rest-timer-display");
-  if (!container || !display) return;
+  if (!container) return;
 
-  stopRestTimer(); // reset if running
+  if (timerTickInterval) clearInterval(timerTickInterval);
 
-  timerSeconds = 90;
+  timerEndAt = Date.now() + seconds * 1000;
   container.style.display = "block";
 
-  const updateDisplay = () => {
-    const mm = Math.floor(timerSeconds / 60);
-    const ss = String(timerSeconds % 60).padStart(2, "0");
-    display.textContent = `${String(mm).padStart(2, '0')}:${ss}`;
-  };
+  renderRestTimer();
+  // 250ms tick: cheap, smooth, makes +15s feel snappy
+  timerTickInterval = setInterval(renderRestTimer, 250);
+}
 
-  updateDisplay();
+function renderRestTimer() {
+  const display = document.getElementById("rest-timer-display");
+  if (!display || timerEndAt == null) return;
 
-  timerInterval = setInterval(() => {
-    timerSeconds--;
-    if (timerSeconds < 0) {
-      stopRestTimer();
-      // Optional: sound or vibration
-      if (Capacitor.isNativePlatform()) {
-        // Haptics.vibrate() or similar
-      }
-      return;
-    }
-    updateDisplay();
-  }, 1000);
+  const remainingMs = timerEndAt - Date.now();
+
+  if (remainingMs <= 0) {
+    display.textContent = "00:00";
+    stopRestTimer();
+    return;
+  }
+
+  const remainingSec = Math.ceil(remainingMs / 1000);
+  const mm = Math.floor(remainingSec / 60);
+  const ss = String(remainingSec % 60).padStart(2, "0");
+  display.textContent = `${String(mm).padStart(2, "0")}:${ss}`;
 }
 
 function stopRestTimer() {
-  if (timerInterval) {
-    clearInterval(timerInterval);
-    timerInterval = null;
+  if (timerTickInterval) {
+    clearInterval(timerTickInterval);
+    timerTickInterval = null;
   }
+  timerEndAt = null;
   const container = document.getElementById("rest-timer-container");
   if (container) container.style.display = "none";
 }
+
+function addRestTime(seconds) {
+  if (timerEndAt == null) return;
+  timerEndAt += seconds * 1000;
+  renderRestTimer();
+}
+
+// Re-render immediately when the app returns to the foreground so the
+// displayed time reflects real elapsed time, not the last paused frame.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) renderRestTimer();
+});
 
 function todayISO() {
   const d = new Date();
@@ -641,6 +658,10 @@ async function safeStart() {
 
     document.getElementById("btn-stop-timer")?.addEventListener("click", () => {
       stopRestTimer();
+    });
+
+    document.getElementById("btn-add-15s")?.addEventListener("click", () => {
+      addRestTime(15);
     });
 
     refreshBtn?.addEventListener("click", async () => {
