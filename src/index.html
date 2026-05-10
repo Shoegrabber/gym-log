@@ -21,9 +21,11 @@
       <div class="row">
         <input id="session-date" type="date" />
         <select id="session-focus">
+          <option value="upper_a">Upper A</option>
+          <option value="lower_a">Lower A</option>
           <option value="push">Push</option>
           <option value="pull">Pull</option>
-          <option value="legs">Legs</option>
+          <option value="lower_b">Lower B</option>
           <option value="mixed">Mixed</option>
           <option value="cardio">Cardio</option>
           <option value="other">Other</option>
@@ -57,11 +59,13 @@
     <div id="selected-session" class="muted">No session selected.</div>
 
     <!-- Rest Timer -->
-    <div id="rest-timer-container"
-      style="display:none; margin-top:14px; padding:12px; background:#f0f7ff; border:1px solid #cce3ff; border-radius:12px; text-align:center;">
-      <div class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:1px;">Rest Timer</div>
-      <div id="rest-timer-display" style="font-size:32px; font-weight:bold; color:#0056b3;">01:30</div>
-      <button id="btn-stop-timer" class="tiny" style="margin-top:8px;">Stop</button>
+    <div id="rest-timer-container" style="display:none;">
+      <div class="muted">Rest Timer</div>
+      <div id="rest-timer-display">01:30</div>
+      <div class="row" style="justify-content:center; gap:8px; margin-top:6px;">
+        <button id="btn-add-15s" class="tiny">+15s</button>
+        <button id="btn-stop-timer" class="tiny">Stop</button>
+      </div>
     </div>
 
     <div style="margin-top:10px;">
@@ -80,7 +84,7 @@
 
         <!-- Unified Search Results -->
         <div id="exercise-picker-list"
-          style="display:none; position:absolute; top:100%; left:0; right:0; z-index:100; max-height:200px; overflow:auto; border:1px solid #ddd; border-radius:8px; background:white; box-shadow:0 4px 12px rgba(0,0,0,0.1); margin-top:4px;">
+          style="display:none; position:absolute; top:100%; left:0; right:0; z-index:100; max-height:200px; overflow:auto; margin-top:4px;">
         </div>
       </div>
 
