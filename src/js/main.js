@@ -27,8 +27,12 @@ import {
   getLatestSetForExercise,
   getPersonalBest,
   getSessionVolume,
-  shouldSuggestRaise
+  shouldSuggestRaise,
+  getLastSessionSetsForExercise,
+  listOrphanExerciseNames,
+  mergeExerciseName
 } from "./db.js";
+import { WEIGHT_INPUT_HINTS } from "./templates.js";
 
 let selectedSessionId = null;
 // Tracks the session_exercise the user most recently logged a set on,
@@ -239,16 +243,18 @@ async function renderSelectedSessionExercises(sessionId) {
     return;
   }
 
-  // Load sets, PB, last-ever set, and raise-suggestion flag per exercise.
-  // lastSet pre-fills the next-set inputs; suggestRaise hints when last
-  // session hit ≥12 reps on every set.
+  // Load sets, PB, last-ever set, raise-suggestion flag, and the previous
+  // session's set list per exercise. lastSet pre-fills next-set inputs;
+  // suggestRaise hints when last session hit ≥12 reps on every set;
+  // lastSessionSets feeds the PB drill-down expand.
   const rowsDetailed = [];
   for (const r of rows) {
     const sets = await listSets(r.id);
     const pb = await getPersonalBest(r.exercise_name);
     const lastSet = await getLatestSetForExercise(r.exercise_name);
     const suggestRaise = await shouldSuggestRaise(r.exercise_name, sessionId);
-    rowsDetailed.push({ ...r, sets, pb, lastSet, suggestRaise });
+    const lastSessionSets = await getLastSessionSetsForExercise(r.exercise_name, sessionId);
+    rowsDetailed.push({ ...r, sets, pb, lastSet, suggestRaise, lastSessionSets });
   }
 
   // Float the last-active exercise to the top so it stays visible next
@@ -404,7 +410,14 @@ async function renderSelectedSessionExercises(sessionId) {
              <button data-action="add-set" data-seid="${r.id}" data-side="R" class="tiny">+ R</button>`
           : `<button data-action="add-set" data-seid="${r.id}" class="tiny">+ Set</button>`;
 
+        // Per-exercise convention hint (e.g. "per hand" on walking lunges
+        // so you don't double-count next session).
+        const weightHint = WEIGHT_INPUT_HINTS[r.exercise_name]
+          ? `<div class="muted" style="margin-top:4px; font-size:11px;">weight: ${WEIGHT_INPUT_HINTS[r.exercise_name]}</div>`
+          : "";
+
         addRow = `
+    ${weightHint}
     <div class="row" style="margin-top: 10px;">
       <input
         data-weight-for="${r.id}"
@@ -448,14 +461,47 @@ async function renderSelectedSessionExercises(sessionId) {
         ? `<div class="muted" style="margin-top:4px; font-size:12px;">💪 Last session was 12+ on every set — try a heavier load.</div>`
         : "";
 
+      // PB drill-down: tap the badge to see the last session's set
+      // breakdown. Lets you spot a one-off heavy single vs. a real
+      // working weight before deciding what to start with today.
+      const pbBadge = r.pb
+        ? `<span class="badge pb-badge" data-action="toggle-pb-details" data-seid="${r.id}" style="cursor:pointer;">PB: ${r.pb}kg ▾</span>`
+        : "";
+
+      const lastSessionSetsHtml = (r.lastSessionSets && r.lastSessionSets.length)
+        ? (() => {
+            const parts = r.lastSessionSets.map(s => {
+              const unit = s.weight_unit === "lbs" ? "lbs" : "kg";
+              const sideTag = s.side ? `${s.side} ` : "";
+              if (s.weight != null && s.reps != null) return `${sideTag}${s.weight}${unit}×${s.reps}`;
+              if (s.weight != null) return `${sideTag}${s.weight}${unit}`;
+              if (s.reps != null) return `${sideTag}${s.reps} reps`;
+              if (s.duration_sec != null) {
+                const mm = Math.floor(s.duration_sec / 60);
+                const ss = String(s.duration_sec % 60).padStart(2, "0");
+                return `${sideTag}${mm}:${ss}`;
+              }
+              return "—";
+            });
+            return parts.map((p, i) => `${i + 1}: ${p}`).join(", ");
+          })()
+        : "no previous session logged";
+
+      const pbDetails = r.pb
+        ? `<div data-pb-details="${r.id}" class="muted" style="display:none; margin-top:4px; font-size:12px;">
+            Last session: ${lastSessionSetsHtml}
+          </div>`
+        : "";
+
       return `<div class="exercise-item">
         <div class="exercise-header">
           <div>
             <strong>${r.exercise_name}</strong>
             ${note}
           </div>
-          ${r.pb ? `<span class="badge pb-badge">PB: ${r.pb}kg</span>` : ""}
+          ${pbBadge}
         </div>
+        ${pbDetails}
         ${raiseHint}
         ${setsHtml}
         ${addRow}
@@ -463,12 +509,23 @@ async function renderSelectedSessionExercises(sessionId) {
     })
     .join("") + volumeHtml;
 
-  // Event delegation (overwrite per render; simple + reliable)
+  // Event delegation (overwrite per render; simple + reliable).
+  // Selector intentionally accepts any element with [data-action] so
+  // the PB badge (a <span>) can also trigger its drill-down.
   container.onclick = async (ev) => {
-    const btn = ev.target?.closest?.("button[data-action]");
+    const btn = ev.target?.closest?.("[data-action]");
     if (!btn) return;
 
     const action = btn.getAttribute("data-action");
+
+    if (action === "toggle-pb-details") {
+      const seid = btn.getAttribute("data-seid");
+      const details = container.querySelector(`[data-pb-details="${seid}"]`);
+      if (details) {
+        details.style.display = details.style.display === "none" ? "block" : "none";
+      }
+      return;
+    }
 
     if (action === "add-set") {
       const sessionExerciseId = Number(btn.getAttribute("data-seid"));
@@ -756,6 +813,10 @@ async function safeStart() {
           logLine("⚠️ No active session to finish.");
           return;
         }
+        // Light cool-down nudge — easy to dismiss if you already stretched.
+        if (!window.confirm("All done? Did you stretch?")) {
+          return;
+        }
         logLine("🟦 Finishing session...", activeId);
         await finishSession(activeId, logLine);
         stopRestTimer();
@@ -936,6 +997,73 @@ async function safeStart() {
 
       await window.renderSessionExercises?.();
       logLine("🟦 Exercise added:", name);
+    });
+
+    // ---------------------------
+    // Merge old exercise names (one-shot tool)
+    // Old logs under deprecated template names are invisible to the new
+    // PB queries because the name doesn't match. This UI surfaces those
+    // orphans and lets the user remap each to a current canonical name.
+    // ---------------------------
+    const loadOrphansBtn = document.getElementById("btn-load-orphans");
+    const orphanListEl = document.getElementById("orphan-list");
+
+    loadOrphansBtn?.addEventListener("click", async () => {
+      try {
+        const orphans = await listOrphanExerciseNames();
+        const canonical = await listExercises(1000);
+
+        if (!orphans.length) {
+          orphanListEl.innerHTML = `<div class="muted">No orphan exercise names found. Your history is clean.</div>`;
+          return;
+        }
+
+        const options = ['<option value="">— pick canonical name —</option>']
+          .concat(canonical.map(e => `<option value="${e.name.replace(/"/g, "&quot;")}">${e.name}</option>`))
+          .join("");
+
+        const rows = orphans.map((o, idx) => `
+          <div class="card" style="margin-top:8px;">
+            <div><strong>${o.name}</strong> <span class="muted">(${o.set_count} sets)</span></div>
+            <div class="row" style="margin-top:6px;">
+              <select data-orphan-map="${idx}" style="flex:1;">${options}</select>
+            </div>
+            <input type="hidden" data-orphan-name="${idx}" value="${o.name.replace(/"/g, "&quot;")}" />
+          </div>
+        `).join("");
+
+        orphanListEl.innerHTML = `
+          ${rows}
+          <div class="row" style="margin-top:12px;">
+            <button id="btn-apply-merge">Apply merges</button>
+          </div>
+        `;
+
+        document.getElementById("btn-apply-merge")?.addEventListener("click", async () => {
+          const selects = orphanListEl.querySelectorAll("select[data-orphan-map]");
+          let merged = 0;
+          let updatedRows = 0;
+          for (const sel of selects) {
+            const idx = sel.getAttribute("data-orphan-map");
+            const oldName = orphanListEl.querySelector(`input[data-orphan-name="${idx}"]`)?.value;
+            const newName = sel.value;
+            if (!oldName || !newName) continue;
+            const n = await mergeExerciseName(oldName, newName);
+            if (n > 0) {
+              merged += 1;
+              updatedRows += n;
+            }
+          }
+          if (merged === 0) {
+            orphanListEl.innerHTML = `<div class="muted">Nothing to merge — no canonical names were picked.</div>`;
+          } else {
+            orphanListEl.innerHTML = `<div class="muted">✅ Merged ${merged} name(s), updated ${updatedRows} session_exercises row(s). Your old PBs should now surface under the new names.</div>`;
+          }
+          logLine(`✅ Merge: ${merged} names, ${updatedRows} rows`);
+        });
+      } catch (e) {
+        logLine("❌ load orphans failed:", String(e));
+      }
     });
   } catch (e) {
     logLine("❌ safeStart crashed:", String(e));
