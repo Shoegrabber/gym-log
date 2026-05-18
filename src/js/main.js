@@ -29,6 +29,7 @@ import {
   getSessionVolume,
   shouldSuggestRaise,
   getLastSessionSetsForExercise,
+  getTopSetsForExercise,
   listOrphanExerciseNames,
   mergeExerciseName
 } from "./db.js";
@@ -254,7 +255,8 @@ async function renderSelectedSessionExercises(sessionId) {
     const lastSet = await getLatestSetForExercise(r.exercise_name);
     const suggestRaise = await shouldSuggestRaise(r.exercise_name, sessionId);
     const lastSessionSets = await getLastSessionSetsForExercise(r.exercise_name, sessionId);
-    rowsDetailed.push({ ...r, sets, pb, lastSet, suggestRaise, lastSessionSets });
+    const topSets = await getTopSetsForExercise(r.exercise_name, sessionId, 5);
+    rowsDetailed.push({ ...r, sets, pb, lastSet, suggestRaise, lastSessionSets, topSets });
   }
 
   // Float the last-active exercise to the top so it stays visible next
@@ -487,9 +489,50 @@ async function renderSelectedSessionExercises(sessionId) {
           })()
         : "no previous session logged";
 
+      // Top-5 heaviest sets ever (excluding current session). Each row is
+      // surgically editable so a single bad outlier (e.g. an lbs entry
+      // typed as kg years ago) can be fixed without scrolling history.
+      const topSetsHtml = (r.topSets && r.topSets.length)
+        ? r.topSets.map(s => {
+            const unit = s.weight_unit === "lbs" ? "lbs" : "kg";
+            const sideTag = s.side ? `${s.side} ` : "";
+            const repsTxt = s.reps != null ? `×${s.reps}` : "";
+            const dateTxt = s.session_date || "";
+            const label = `${sideTag}${s.weight}${unit}${repsTxt} <span class="muted">— ${dateTxt}</span>`;
+
+            const sideOpts = `
+              <option value="" ${!s.side ? "selected" : ""}>—</option>
+              <option value="L" ${s.side === "L" ? "selected" : ""}>L</option>
+              <option value="R" ${s.side === "R" ? "selected" : ""}>R</option>
+            `;
+            const editForm = `
+              <div class="set-edit" data-edit-form="${s.id}" style="display:none; gap:6px; flex-wrap:wrap; margin-top:4px;">
+                <input data-edit-weight="${s.id}" inputmode="decimal" value="${s.weight ?? ""}" style="width:60px;" />
+                <select data-edit-unit="${s.id}" style="width:56px;">
+                  <option value="kg" ${unit === "kg" ? "selected" : ""}>kg</option>
+                  <option value="lbs" ${unit === "lbs" ? "selected" : ""}>lbs</option>
+                </select>
+                <input data-edit-reps="${s.id}" inputmode="numeric" value="${s.reps ?? ""}" style="width:60px;" />
+                ${r.is_unilateral ? `<select data-edit-side="${s.id}" style="width:56px;">${sideOpts}</select>` : ""}
+                <button class="tiny" data-action="save-edit" data-setid="${s.id}">✓</button>
+                <button class="tiny" data-action="cancel-edit" data-setid="${s.id}">✗</button>
+              </div>
+            `;
+            return `
+              <div class="set-row" data-set-row="${s.id}" style="padding:4px 0;">
+                <div data-set-label="${s.id}">${label}</div>
+                ${editForm}
+                <button class="linkbtn tiny" data-action="edit-set" data-setid="${s.id}">✎</button>
+                <button class="danger tiny" data-action="delete-set" data-setid="${s.id}">🗑</button>
+              </div>`;
+          }).join("")
+        : `<div class="muted">no prior sets logged</div>`;
+
       const pbDetails = r.pb
-        ? `<div data-pb-details="${r.id}" class="muted" style="display:none; margin-top:4px; font-size:12px;">
-            Last session: ${lastSessionSetsHtml}
+        ? `<div data-pb-details="${r.id}" style="display:none; margin-top:6px; padding:8px; border-left:2px solid #888; font-size:12px;">
+            <div class="muted" style="margin-bottom:4px;">Last session: ${lastSessionSetsHtml}</div>
+            <div class="muted" style="margin-top:6px; font-weight:600;">Top 5 heaviest ever (tap ✎ to fix a bad entry, 🗑 to delete):</div>
+            <div style="margin-top:4px;">${topSetsHtml}</div>
           </div>`
         : "";
 
