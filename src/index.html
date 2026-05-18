@@ -51,6 +51,23 @@
         <div id="sessions" style="margin-top:10px;"></div>
       </details>
     </div>
+
+    <!-- One-shot tool: merge old exercise names so historic PBs surface
+         under the new canonical names introduced in Phase H. -->
+    <div class="section">
+      <details id="merge-names-tool">
+        <summary>🔧 Merge old exercise names</summary>
+        <div class="muted" style="margin-top:8px;">
+          Older log entries may not match the new canonical names
+          (e.g. "Bench press" vs "Smith machine bench press"). Map each
+          old name to its new equivalent so PB and history queries see it.
+        </div>
+        <div style="margin-top:10px;">
+          <button id="btn-load-orphans" class="linkbtn">Scan for old names</button>
+        </div>
+        <div id="orphan-list" style="margin-top:10px;"></div>
+      </details>
+    </div>
   </div>
 
   <!-- Selected session (Session View) -->
@@ -68,10 +85,11 @@
       </div>
     </div>
 
-    <div style="margin-top:10px;">
-      <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
-    </div>
+    <div id="exercises" style="margin-top:12px;"></div>
 
+    <!-- Add-exercise controls and Finish-session button live BELOW the
+         exercise list so the timer + recent set stay at the top of the
+         viewport during a workout. -->
     <div id="exercise-controls" style="display:none; margin-top:14px;">
       <h3 style="margin:0 0 8px;">Add exercise</h3>
 
@@ -96,7 +114,9 @@
       <div id="recent-exercise-pills" class="row" style="gap:8px; margin-top:6px;"></div>
     </div>
 
-    <div id="exercises" style="margin-top:12px;"></div>
+    <div style="margin-top:18px;">
+      <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
+    </div>
   </div>
 
   <!-- Status -->

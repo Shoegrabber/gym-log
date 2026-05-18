@@ -32,7 +32,20 @@ export const UNILATERAL_EXERCISES = [
   "Single-arm tricep pushdown",
   "Single leg press",
   "Single-leg lying leg curl",
+  // Dumbbell-in-each-hand exercises: each side is its own working effort,
+  // so log L and R independently.
+  "Hammer curl",
+  "Dumbbell preacher curl",
 ];
+
+// Per-exercise hint shown next to the weight input. Used to disambiguate
+// "weight per hand" vs "total" for exercises where the convention isn't obvious.
+export const WEIGHT_INPUT_HINTS = {
+  "Walking lunges": "per hand",
+  "Bulgarian split squat": "per hand",
+  "Hammer curl": "per hand",
+  "Dumbbell preacher curl": "per hand",
+};
 
 // Rith's split, per Sheet2.csv (2026-04). Targets are starting weights.
 export const TEMPLATES = {

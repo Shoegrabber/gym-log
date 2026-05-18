@@ -471,18 +471,94 @@ export async function getLatestSetForExercise(exerciseName) {
 }
 
 /**
- * Returns the personal best (max weight) for a given exercise name.
+ * Returns the personal best for a given exercise name, normalised to kg.
+ * Rows logged as lbs are converted on the fly so a 200-lb entry doesn't
+ * eclipse a real 91-kg PB. Returned value is rounded to 1 decimal kg.
  */
 export async function getPersonalBest(exerciseName) {
   await initDb();
   const res = await db.query(
-    `SELECT MAX(weight) as pb
+    `SELECT MAX(
+        CASE WHEN weight_unit = 'lbs' THEN weight * 0.45359237 ELSE weight END
+     ) as pb
      FROM sets s
      JOIN session_exercises se ON s.session_exercise_id = se.id
-     WHERE se.exercise_name = ?`,
+     WHERE se.exercise_name = ?
+       AND s.weight IS NOT NULL`,
     [exerciseName]
   );
-  return res.values?.[0]?.pb ?? null;
+  const raw = res.values?.[0]?.pb;
+  if (raw == null) return null;
+  return Math.round(Number(raw) * 10) / 10;
+}
+
+/**
+ * Returns the sets from the most recent PRIOR session_exercise for the
+ * given exercise name (excluding the current session). Used by the PB
+ * drill-down so the user can see how the last session actually went —
+ * a one-off heavy single vs. a real working weight.
+ */
+export async function getLastSessionSetsForExercise(exerciseName, currentSessionId) {
+  await initDb();
+  const seRes = await db.query(
+    `SELECT id FROM session_exercises
+     WHERE exercise_name = ? AND session_id != ?
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [exerciseName, currentSessionId ?? -1]
+  );
+  const seId = seRes.values?.[0]?.id;
+  if (!seId) return [];
+  const setRes = await db.query(
+    `SELECT position, weight, weight_unit, reps, duration_sec, side
+     FROM sets
+     WHERE session_exercise_id = ?
+     ORDER BY position ASC, id ASC`,
+    [seId]
+  );
+  return setRes.values ?? [];
+}
+
+/**
+ * Lists exercise names that appear in old session_exercises but have no
+ * matching row in the canonical exercises table — orphans from older
+ * templates whose names changed in Phase H. Used by the merge tool to
+ * resurface old PBs under their new canonical names.
+ */
+export async function listOrphanExerciseNames() {
+  await initDb();
+  const res = await db.query(
+    `SELECT DISTINCT se.exercise_name AS name,
+            COUNT(s.id) AS set_count
+     FROM session_exercises se
+     LEFT JOIN exercises e ON e.name = se.exercise_name
+     LEFT JOIN sets s ON s.session_exercise_id = se.id
+     WHERE e.id IS NULL
+     GROUP BY se.exercise_name
+     ORDER BY set_count DESC, name ASC`
+  );
+  return res.values ?? [];
+}
+
+/**
+ * Renames every session_exercises row from oldName to newName, so old
+ * PBs surface under the new canonical name. Idempotent — running twice
+ * with the same args does nothing the second time.
+ */
+export async function mergeExerciseName(oldName, newName) {
+  await initDb();
+  if (!oldName || !newName || oldName === newName) return 0;
+  const before = await db.query(
+    `SELECT COUNT(*) AS c FROM session_exercises WHERE exercise_name = ?`,
+    [oldName]
+  );
+  const count = Number(before.values?.[0]?.c ?? 0);
+  if (!count) return 0;
+  await db.run(
+    `UPDATE session_exercises SET exercise_name = ? WHERE exercise_name = ?`,
+    [newName, oldName]
+  );
+  return count;
 }
 
 async function getNextSetPosition(sessionExerciseId) {
