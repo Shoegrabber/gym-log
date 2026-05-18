@@ -493,6 +493,33 @@ export async function getPersonalBest(exerciseName) {
 }
 
 /**
+ * Returns the top-N heaviest sets ever logged for this exercise across
+ * all prior sessions, normalised to kg. Used by the PB inspector so the
+ * user can spot a single outlier (e.g. an lbs entry mis-logged as kg
+ * many months ago) and fix it surgically without scrolling a year of
+ * sessions. Current session is excluded — it has its own edit UI inline.
+ */
+export async function getTopSetsForExercise(exerciseName, currentSessionId, limit = 5) {
+  await initDb();
+  const res = await db.query(
+    `SELECT s.id, s.session_exercise_id, s.weight, s.weight_unit, s.reps, s.side,
+            s.duration_sec, s.notes,
+            (CASE WHEN s.weight_unit = 'lbs' THEN s.weight * 0.45359237 ELSE s.weight END) AS norm_kg,
+            se.session_id, sess.date AS session_date, sess.focus AS session_focus
+     FROM sets s
+     JOIN session_exercises se ON s.session_exercise_id = se.id
+     JOIN sessions sess ON se.session_id = sess.id
+     WHERE se.exercise_name = ?
+       AND s.weight IS NOT NULL
+       AND se.session_id != ?
+     ORDER BY norm_kg DESC, s.created_at DESC
+     LIMIT ?`,
+    [exerciseName, currentSessionId ?? -1, limit]
+  );
+  return res.values ?? [];
+}
+
+/**
  * Returns the sets from the most recent PRIOR session_exercise for the
  * given exercise name (excluding the current session). Used by the PB
  * drill-down so the user can see how the last session actually went —
