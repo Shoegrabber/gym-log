@@ -134,9 +134,66 @@ function todayISO() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+/* --------------------------------------------------
+   View router + Session-tab inner state
+   The app is a 4-tab single page (Session / History /
+   Library / Timer). Switching tabs only show/hides
+   divs — it never touches the DB, so navigating away
+   from an active session simply *suspends* it.
+-------------------------------------------------- */
+const VIEWS = ["session", "history", "library", "timer"];
+
+function showView(name) {
+  for (const v of VIEWS) {
+    const el = document.getElementById(`view-${v}`);
+    if (el) el.style.display = v === name ? "block" : "none";
+  }
+  document.querySelectorAll("#bottom-nav [data-nav]").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-nav") === name);
+  });
+}
+
+// Session tab has two inner states: idle (create + dashboard) and
+// active (a session being worked). Suspend = flip to idle without
+// ending the session.
+function showSessionState(state) {
+  const idle = document.getElementById("session-idle");
+  const active = document.getElementById("session-active");
+  if (idle) idle.style.display = state === "idle" ? "block" : "none";
+  if (active) active.style.display = state === "active" ? "block" : "none";
+}
+
+// Live-session dot on the Session nav icon.
+async function updateLiveDot() {
+  const dot = document.querySelector('#bottom-nav [data-nav="session"] .live-dot');
+  if (!dot) return;
+  const activeId = await getActiveSessionId();
+  dot.style.display = activeId ? "block" : "none";
+}
+
+// Render the idle view's resume banner: if a session is active in the
+// DB, offer a one-tap way back into it.
+async function renderSessionIdle() {
+  const banner = document.getElementById("resume-banner");
+  if (!banner) return;
+  const activeId = await getActiveSessionId();
+  if (!activeId) {
+    banner.style.display = "none";
+    banner.innerHTML = "";
+    return;
+  }
+  const d = await getSessionDetail(activeId);
+  banner.innerHTML = `<button id="btn-resume">▶ Resume ${d.focus.toUpperCase()} — ${d.date}</button>`;
+  banner.style.display = "block";
+  document.getElementById("btn-resume")?.addEventListener("click", async () => {
+    selectedSessionId = activeId;
+    setSelectedSessionUI(d);
+    await renderSelectedSessionExercises(activeId);
+    showView("session");
+  });
+}
+
 function setSelectedSessionUI(session) {
-  const homeView = document.getElementById("home-view");
-  const sessionView = document.getElementById("session-view");
   const selectedEl = document.getElementById("selected-session");
   const finishBtn = document.getElementById("btn-finish-session");
   const exerciseControls = document.getElementById("exercise-controls");
@@ -145,8 +202,7 @@ function setSelectedSessionUI(session) {
   if (!selectedEl) return;
 
   if (!session) {
-    if (homeView) homeView.style.display = "block";
-    if (sessionView) sessionView.style.display = "none";
+    showSessionState("idle");
     selectedEl.textContent = "No session selected.";
     if (finishBtn) finishBtn.style.display = "none";
     if (exerciseControls) exerciseControls.style.display = "none";
@@ -154,8 +210,7 @@ function setSelectedSessionUI(session) {
     return;
   }
 
-  if (homeView) homeView.style.display = "none";
-  if (sessionView) sessionView.style.display = "block";
+  showSessionState("active");
 
   selectedEl.innerHTML = `
     <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -196,21 +251,7 @@ async function refreshSessionsList() {
 
     sessionsEl.appendChild(div);
 
-    div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", async () => {
-      // Only mark active if the session is actually active
-      if (s.status === "active") {
-        await setActiveSessionId(s.id);
-      }
-
-      selectedSessionId = s.id;
-      lastActiveSessionExerciseId = null;
-      const detail = await getSessionDetail(s.id);
-      setSelectedSessionUI(detail);
-
-      await renderSelectedSessionExercises(s.id);
-
-      logLine(`✅ Opened session id=${s.id}`);
-    });
+    div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", () => openHistorySession(s));
 
     div.querySelector(`[data-delete="${s.id}"]`).addEventListener("click", async () => {
       await deleteSession(s.id, logLine);
@@ -221,6 +262,7 @@ async function refreshSessionsList() {
         selectedSessionId = null;
         setSelectedSessionUI(null);
       }
+      await updateLiveDot();
       await refreshSessionsList();
     });
   }
@@ -228,8 +270,40 @@ async function refreshSessionsList() {
   logLine(`✅ Refreshed sessions (${sessions.length})`);
 }
 
-async function renderSelectedSessionExercises(sessionId) {
-  const container = document.getElementById("exercises");
+// Open a session from the History list.
+//  - Active session  → resume it on the Session tab (full editing UI)
+//  - Finished session → read-only detail view inside the History tab
+async function openHistorySession(s) {
+  const detail = await getSessionDetail(s.id);
+
+  if (s.status === "active") {
+    await setActiveSessionId(s.id);
+    selectedSessionId = s.id;
+    lastActiveSessionExerciseId = null;
+    setSelectedSessionUI(detail);
+    await renderSelectedSessionExercises(s.id);
+    await updateLiveDot();
+    showView("session");
+    logLine(`✅ Resumed active session id=${s.id}`);
+    return;
+  }
+
+  // Finished — render into the History detail pane.
+  const header = document.getElementById("history-session-header");
+  if (header) {
+    header.innerHTML = `
+      <div style="font-family:'Montserrat',sans-serif; font-size:20px; font-weight:700;">${detail.focus.toUpperCase()}</div>
+      <div class="muted" style="margin-top:4px;">${detail.date}</div>
+      ${detail.notes ? `<div class="muted">Notes: ${detail.notes}</div>` : ""}
+    `;
+  }
+  document.getElementById("history-list").style.display = "none";
+  document.getElementById("history-detail").style.display = "block";
+  await renderSelectedSessionExercises(s.id, document.getElementById("history-exercises"));
+  logLine(`✅ Opened finished session id=${s.id} in history detail`);
+}
+
+async function renderSelectedSessionExercises(sessionId, container = document.getElementById("exercises")) {
   if (!container) return;
 
   if (!sessionId) {
@@ -596,7 +670,7 @@ async function renderSelectedSessionExercises(sessionId) {
       lastActiveSessionExerciseId = sessionExerciseId;
       startRestTimer();
 
-      await renderSelectedSessionExercises(sessionId);
+      await renderSelectedSessionExercises(sessionId, container);
       return;
     }
 
@@ -628,7 +702,7 @@ async function renderSelectedSessionExercises(sessionId) {
       lastActiveSessionExerciseId = sessionExerciseId;
       startRestTimer();
 
-      await renderSelectedSessionExercises(sessionId);
+      await renderSelectedSessionExercises(sessionId, container);
       return;
     }
 
@@ -657,14 +731,14 @@ async function renderSelectedSessionExercises(sessionId) {
 
       lastActiveSessionExerciseId = sessionExerciseId;
       startRestTimer();
-      await renderSelectedSessionExercises(sessionId);
+      await renderSelectedSessionExercises(sessionId, container);
       return;
     }
 
     if (action === "delete-set") {
       const setId = Number(btn.getAttribute("data-setid"));
       await deleteSet(setId);
-      await renderSelectedSessionExercises(sessionId);
+      await renderSelectedSessionExercises(sessionId, container);
       return;
     }
 
@@ -680,7 +754,7 @@ async function renderSelectedSessionExercises(sessionId) {
 
     if (action === "cancel-edit") {
       // Re-render restores original values from the DB.
-      await renderSelectedSessionExercises(sessionId);
+      await renderSelectedSessionExercises(sessionId, container);
       return;
     }
 
@@ -703,7 +777,7 @@ async function renderSelectedSessionExercises(sessionId) {
       if (sideRaw !== undefined) fields.side = sideRaw;
 
       await updateSet(setId, fields);
-      await renderSelectedSessionExercises(sessionId);
+      await renderSelectedSessionExercises(sessionId, container);
       return;
     }
 
@@ -733,7 +807,7 @@ async function renderSelectedSessionExercises(sessionId) {
         lastActiveSessionExerciseId = sessionExerciseId;
         startRestTimer();
 
-        await renderSelectedSessionExercises(selectedSessionId);
+        await renderSelectedSessionExercises(sessionId, container);
       } catch (e) {
         logLine("❌ repeat-set failed:", String(e));
         if (e?.stack) logLine(e.stack);
@@ -748,7 +822,7 @@ async function renderSelectedSessionExercises(sessionId) {
         await deleteSessionExercise(sessionExerciseId);
 
         logLine("✅ Removed exercise from session_exercises:", { sessionExerciseId });
-        await renderSelectedSessionExercises(selectedSessionId);
+        await renderSelectedSessionExercises(sessionId, container);
       } catch (e) {
         logLine("❌ delete-exercise failed:", String(e));
         if (e?.stack) logLine(e.stack);
@@ -832,6 +906,8 @@ async function safeStart() {
 
         setSelectedSessionUI(detail);
         await renderSelectedSessionExercises(selectedSessionId);
+        await updateLiveDot();
+        showView("session");
         await refreshSessionsList();
       } catch (e) {
         logLine("❌ Create session failed:", String(e));
@@ -864,20 +940,17 @@ async function safeStart() {
         await finishSession(activeId, logLine);
         stopRestTimer();
 
-        logLine("🟦 Resetting UI to home-view...");
+        logLine("🟦 Resetting UI to idle...");
         selectedSessionId = null;
         lastActiveSessionExerciseId = null;
         setSelectedSessionUI(null);
 
-        // Manual override just in case
-        const hv = document.getElementById("home-view");
-        const sv = document.getElementById("session-view");
-        if (hv) hv.style.display = "block";
-        if (sv) sv.style.display = "none";
-
         await renderSelectedSessionExercises(null);
+        await renderSessionIdle();
+        await updateLiveDot();
+        showView("session");
         await refreshSessionsList();
-        logLine("✅ Session finished and returned home.");
+        logLine("✅ Session finished and returned to idle.");
       } catch (e) {
         logLine("❌ Finish session failed:", String(e));
         if (e?.stack) logLine(e.stack);
@@ -900,6 +973,32 @@ async function safeStart() {
       }
     });
 
+    // ---------------------------
+    // Bottom nav + back buttons
+    // ---------------------------
+    document.querySelectorAll("#bottom-nav [data-nav]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const name = btn.getAttribute("data-nav");
+        // Refresh per-tab content on entry.
+        if (name === "session") await renderSessionIdle();
+        if (name === "history") await refreshSessionsList();
+        showView(name);
+      });
+    });
+
+    // Back from an active session → suspend (flip to idle, DB untouched,
+    // timer keeps running).
+    document.getElementById("btn-session-back")?.addEventListener("click", async () => {
+      await renderSessionIdle();
+      showSessionState("idle");
+    });
+
+    // Back from a finished-session detail → return to the history list.
+    document.getElementById("btn-history-back")?.addEventListener("click", () => {
+      document.getElementById("history-detail").style.display = "none";
+      document.getElementById("history-list").style.display = "block";
+    });
+
     // Load active session (if any)
     const activeId = await getActiveSessionId();
 
@@ -914,6 +1013,10 @@ async function safeStart() {
       setSelectedSessionUI(null);
       logLine("ℹ️ No active session set.");
     }
+
+    await renderSessionIdle();
+    await updateLiveDot();
+    showView("session");
 
     await refreshSessionsList();
 

@@ -13,119 +13,192 @@
   <h1>Gym Log</h1>
   <p class="sub">Log fast. Review later.</p>
 
-  <!-- Home View (Hidden during active session) -->
-  <div id="home-view">
-    <!-- Create session -->
-    <div class="section">
-      <h2>Create session</h2>
-      <div class="row">
-        <input id="session-date" type="date" />
-        <select id="session-focus">
-          <option value="upper_a">Upper A</option>
-          <option value="lower_a">Lower A</option>
-          <option value="push">Push</option>
-          <option value="pull">Pull</option>
-          <option value="lower_b">Lower B</option>
-          <option value="mixed">Mixed</option>
-          <option value="cardio">Cardio</option>
-          <option value="other">Other</option>
-        </select>
-      </div>
-      <div class="row" style="margin-top:10px;">
-        <input id="session-notes" type="text" placeholder="notes (optional)" style="flex:1;" />
-        <button id="btn-create-session">Create</button>
-      </div>
-      <!-- Export lives on home screen, not during a session -->
-      <div class="row" style="margin-top:10px;">
-        <button id="btn-export-data">Export Data (CSV + JSON)</button>
-      </div>
-    </div>
+  <div id="app-views">
 
-    <!-- Recent sessions below -->
-    <div class="section">
-      <details id="recent-sessions">
-        <summary>Recent sessions</summary>
-        <div style="margin-top:10px;">
-          <button id="btn-refresh-sessions" class="linkbtn">Refresh list</button>
-        </div>
-        <div id="sessions" style="margin-top:10px;"></div>
-      </details>
-    </div>
+    <!-- ============================================================
+         SESSION TAB — idle (create + dashboard) or active (working)
+         ============================================================ -->
+    <section class="view" id="view-session">
 
-    <!-- One-shot tool: merge old exercise names so historic PBs surface
-         under the new canonical names introduced in Phase H. -->
-    <div class="section">
-      <details id="merge-names-tool">
-        <summary>🔧 Merge old exercise names</summary>
-        <div class="muted" style="margin-top:8px;">
-          Older log entries may not match the new canonical names
-          (e.g. "Bench press" vs "Smith machine bench press"). Map each
-          old name to its new equivalent so PB and history queries see it.
+      <!-- IDLE STATE: shown when no session is being worked -->
+      <div id="session-idle">
+
+        <!-- Resume banner: only shown when a session is active in the DB
+             but the user has navigated to the idle view -->
+        <div id="resume-banner" style="display:none;"></div>
+
+        <!-- Mini dashboard placeholder (filled in a later increment) -->
+        <div id="mini-dashboard"></div>
+
+        <!-- Create session -->
+        <div class="section">
+          <h2>Create session</h2>
+          <div class="row">
+            <input id="session-date" type="date" />
+            <select id="session-focus">
+              <option value="upper_a">Upper A</option>
+              <option value="lower_a">Lower A</option>
+              <option value="push">Push</option>
+              <option value="pull">Pull</option>
+              <option value="lower_b">Lower B</option>
+              <option value="mixed">Mixed</option>
+              <option value="cardio">Cardio</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <input id="session-notes" type="text" placeholder="notes (optional)" style="flex:1;" />
+            <button id="btn-create-session">Create</button>
+          </div>
+          <div class="row" style="margin-top:10px;">
+            <button id="btn-export-data">Export Data (CSV + JSON)</button>
+          </div>
         </div>
-        <div style="margin-top:10px;">
-          <button id="btn-load-orphans" class="linkbtn">Scan for old names</button>
+
+        <!-- One-shot maintenance tool: merge old exercise names -->
+        <div class="section">
+          <details id="merge-names-tool">
+            <summary>🔧 Merge old exercise names</summary>
+            <div class="muted" style="margin-top:8px;">
+              Older log entries may not match the new canonical names
+              (e.g. "Bench press" vs "Smith machine bench press"). Map each
+              old name to its new equivalent so PB and history queries see it.
+            </div>
+            <div style="margin-top:10px;">
+              <button id="btn-load-orphans" class="linkbtn">Scan for old names</button>
+            </div>
+            <div id="orphan-list" style="margin-top:10px;"></div>
+          </details>
         </div>
-        <div id="orphan-list" style="margin-top:10px;"></div>
-      </details>
-    </div>
+
+        <!-- Status -->
+        <div class="section">
+          <details id="status-details">
+            <summary>Status (debug)</summary>
+            <div id="log" class="status" style="margin-top:10px;">Booting...</div>
+          </details>
+        </div>
+      </div>
+
+      <!-- ACTIVE STATE: shown when a session is being worked -->
+      <div id="session-active" style="display:none;">
+        <div class="row" style="justify-content:space-between; align-items:center;">
+          <button id="btn-session-back" class="linkbtn tiny">◀ Back</button>
+          <span class="muted" style="font-size:11px;">session stays active</span>
+        </div>
+
+        <div id="selected-session" class="muted" style="margin-top:10px;">No session selected.</div>
+
+        <!-- Rest Timer -->
+        <div id="rest-timer-container" style="display:none;">
+          <div class="muted">Rest Timer</div>
+          <div id="rest-timer-display">01:30</div>
+          <div class="row" style="justify-content:center; gap:8px; margin-top:6px;">
+            <button id="btn-add-15s" class="tiny">+15s</button>
+            <button id="btn-stop-timer" class="tiny">Stop</button>
+          </div>
+        </div>
+
+        <div id="exercises" style="margin-top:12px;"></div>
+
+        <!-- Add-exercise controls + Finish below the list so the timer +
+             recent set stay at the top of the viewport during a workout. -->
+        <div id="exercise-controls" style="display:none; margin-top:14px;">
+          <h3 style="margin:0 0 8px;">Add exercise</h3>
+
+          <div id="unified-exercise-entry" style="position:relative;">
+            <div class="row">
+              <input id="exercise-name" type="text" placeholder="Search or enter exercise name..." style="flex:1;"
+                autocomplete="off" />
+              <button id="btn-add-exercise">Add</button>
+            </div>
+
+            <div id="exercise-picker-list"
+              style="display:none; position:absolute; top:100%; left:0; right:0; z-index:100; max-height:200px; overflow:auto; margin-top:4px;">
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:10px;">
+            <input id="exercise-notes" type="text" placeholder="exercise notes (optional)" style="flex:1;" />
+          </div>
+
+          <div class="muted" style="margin-top:10px;">Suggested:</div>
+          <div id="recent-exercise-pills" class="row" style="gap:8px; margin-top:6px;"></div>
+        </div>
+
+        <div style="margin-top:18px;">
+          <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         HISTORY TAB — past sessions list + detail
+         ============================================================ -->
+    <section class="view" id="view-history" style="display:none;">
+      <div id="history-list">
+        <div class="section">
+          <h2>Recent sessions</h2>
+          <div>
+            <button id="btn-refresh-sessions" class="linkbtn tiny">Refresh list</button>
+          </div>
+          <div id="sessions" style="margin-top:10px;"></div>
+        </div>
+      </div>
+
+      <div id="history-detail" style="display:none;">
+        <button id="btn-history-back" class="linkbtn tiny">◀ Back to sessions</button>
+        <div class="section" style="margin-top:12px;">
+          <div id="history-session-header" class="muted"></div>
+          <div id="history-exercises" style="margin-top:12px;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         LIBRARY TAB — stub (exercises + videos, later increment)
+         ============================================================ -->
+    <section class="view" id="view-library" style="display:none;">
+      <div class="section">
+        <h2>Exercise library</h2>
+        <div class="muted">Coming soon — every exercise, with form-check videos.</div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         TIMER TAB — stub (standalone stopwatch, later increment)
+         ============================================================ -->
+    <section class="view" id="view-timer" style="display:none;">
+      <div class="section">
+        <h2>Timer</h2>
+        <div class="muted">Coming soon — a standalone stopwatch / interval timer.</div>
+      </div>
+    </section>
+
   </div>
 
-  <!-- Selected session (Session View) -->
-  <div class="section" id="session-view">
-    <h2>Active session</h2>
-    <div id="selected-session" class="muted">No session selected.</div>
-
-    <!-- Rest Timer -->
-    <div id="rest-timer-container" style="display:none;">
-      <div class="muted">Rest Timer</div>
-      <div id="rest-timer-display">01:30</div>
-      <div class="row" style="justify-content:center; gap:8px; margin-top:6px;">
-        <button id="btn-add-15s" class="tiny">+15s</button>
-        <button id="btn-stop-timer" class="tiny">Stop</button>
-      </div>
-    </div>
-
-    <div id="exercises" style="margin-top:12px;"></div>
-
-    <!-- Add-exercise controls and Finish-session button live BELOW the
-         exercise list so the timer + recent set stay at the top of the
-         viewport during a workout. -->
-    <div id="exercise-controls" style="display:none; margin-top:14px;">
-      <h3 style="margin:0 0 8px;">Add exercise</h3>
-
-      <div id="unified-exercise-entry" style="position:relative;">
-        <div class="row">
-          <input id="exercise-name" type="text" placeholder="Search or enter exercise name..." style="flex:1;"
-            autocomplete="off" />
-          <button id="btn-add-exercise">Add</button>
-        </div>
-
-        <!-- Unified Search Results -->
-        <div id="exercise-picker-list"
-          style="display:none; position:absolute; top:100%; left:0; right:0; z-index:100; max-height:200px; overflow:auto; margin-top:4px;">
-        </div>
-      </div>
-
-      <div class="row" style="margin-top:10px;">
-        <input id="exercise-notes" type="text" placeholder="exercise notes (optional)" style="flex:1;" />
-      </div>
-
-      <div class="muted" style="margin-top:10px;">Suggested:</div>
-      <div id="recent-exercise-pills" class="row" style="gap:8px; margin-top:6px;"></div>
-    </div>
-
-    <div style="margin-top:18px;">
-      <button id="btn-finish-session" class="linkbtn" style="display:none;">Finish session</button>
-    </div>
-  </div>
-
-  <!-- Status -->
-  <div class="section">
-    <details id="status-details">
-      <summary>Status (debug)</summary>
-      <div id="log" class="status" style="margin-top:10px;">Booting...</div>
-    </details>
-  </div>
+  <!-- ============================================================
+       BOTTOM NAV
+       ============================================================ -->
+  <nav id="bottom-nav">
+    <button data-nav="session" class="active">
+      <span class="nav-icon">🏋</span>
+      <span>Session</span>
+      <span class="live-dot"></span>
+    </button>
+    <button data-nav="history">
+      <span class="nav-icon">📅</span>
+      <span>History</span>
+    </button>
+    <button data-nav="library">
+      <span class="nav-icon">📚</span>
+      <span>Library</span>
+    </button>
+    <button data-nav="timer">
+      <span class="nav-icon">⏱</span>
+      <span>Timer</span>
+    </button>
+  </nav>
 
   <script type="module" src="./js/main.js"></script>
 </body>
