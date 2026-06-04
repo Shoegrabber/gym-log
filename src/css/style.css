@@ -61,7 +61,8 @@ body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   color: var(--text-primary);
   line-height: 1.5;
-  padding: 16px 16px 48px;
+  /* Bottom padding clears the fixed nav bar */
+  padding: 16px 16px 84px;
   max-width: 520px;
   margin: 0 auto;
   min-height: 100vh;
@@ -504,4 +505,71 @@ details[open] summary::before {
 /* jeep-sqlite must stay hidden — it's a service component */
 jeep-sqlite {
   display: none;
+}
+
+/* ─── Bottom navigation ─── */
+#bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-width: 520px;
+  margin: 0 auto;
+  display: flex;
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  z-index: 200;
+  /* Respect iOS/Android home-indicator safe area */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+#bottom-nav button {
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 9px 0 11px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  position: relative;
+  transition: color 0.15s ease;
+}
+
+#bottom-nav button:active {
+  transform: none;
+}
+
+#bottom-nav .nav-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+#bottom-nav button.active {
+  color: var(--accent-bright);
+}
+
+/* Live-session indicator dot (Session tab) — hidden unless toggled on */
+#bottom-nav .live-dot {
+  display: none;
+  position: absolute;
+  top: 7px;
+  left: calc(50% + 9px);
+  width: 8px;
+  height: 8px;
+  background: var(--success-fg);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+
+/* ─── Resume banner (active session, viewed from idle) ─── */
+#resume-banner button {
+  width: 100%;
+  background: linear-gradient(135deg, #4f46e5, #06b6d4);
+  color: #fff;
+  font-weight: 700;
+  padding: 14px;
+  margin-bottom: 4px;
 }
