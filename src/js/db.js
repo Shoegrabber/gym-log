@@ -710,6 +710,97 @@ export async function getSessionVolume(sessionId) {
   return Math.round(total);
 }
 
+/* --------------------------------------------------
+   Dashboard stats (home/idle mini-dashboard)
+-------------------------------------------------- */
+
+// Monday-anchored start of the week containing `d`, at 00:00 local.
+function weekStartMonday(d) {
+  const x = new Date(d);
+  const dow = (x.getDay() + 6) % 7; // 0 = Monday
+  x.setDate(x.getDate() - dow);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function toISODate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+export async function getTotalSessionCount() {
+  await initDb();
+  const res = await db.query(`SELECT COUNT(*) AS c FROM sessions`);
+  return Number(res.values?.[0]?.c ?? 0);
+}
+
+/**
+ * Total volume (Σ normalised-kg × reps) for sessions whose date falls in
+ * [startISO, endISO). Dates are 'YYYY-MM-DD' strings so lexicographic
+ * comparison is correct. lbs sets are converted to kg in SQL.
+ */
+export async function getVolumeBetween(startISO, endISO) {
+  await initDb();
+  const res = await db.query(
+    `SELECT COALESCE(SUM(
+        (CASE WHEN s.weight_unit = 'lbs' THEN s.weight * 0.45359237 ELSE s.weight END) * s.reps
+     ), 0) AS vol
+     FROM sets s
+     JOIN session_exercises se ON s.session_exercise_id = se.id
+     JOIN sessions sess ON se.session_id = sess.id
+     WHERE s.weight IS NOT NULL AND s.reps IS NOT NULL
+       AND sess.date >= ? AND sess.date < ?`,
+    [startISO, endISO]
+  );
+  return Math.round(Number(res.values?.[0]?.vol ?? 0));
+}
+
+/**
+ * Top-N exercises by personal-best weight (normalised to kg). Powers the
+ * dashboard PB strip. Heavy machine lifts (leg press etc.) naturally sort
+ * to the top — it's an at-a-glance "biggest numbers" view.
+ */
+export async function getTopPBs(limit = 5) {
+  await initDb();
+  const res = await db.query(
+    `SELECT se.exercise_name AS name,
+            MAX(CASE WHEN s.weight_unit = 'lbs' THEN s.weight * 0.45359237 ELSE s.weight END) AS pb
+     FROM sets s
+     JOIN session_exercises se ON s.session_exercise_id = se.id
+     WHERE s.weight IS NOT NULL
+     GROUP BY se.exercise_name
+     ORDER BY pb DESC
+     LIMIT ?`,
+    [limit]
+  );
+  return (res.values ?? []).map((r) => ({
+    name: r.name,
+    pb: Math.round(Number(r.pb) * 10) / 10,
+  }));
+}
+
+/**
+ * Bundles the dashboard numbers: total sessions, this-week vs last-week
+ * volume (Monday-anchored), and the top 5 PBs. Queries run sequentially
+ * to avoid concurrent use of the single SQLite connection.
+ */
+export async function getDashboardStats() {
+  await initDb();
+  const now = new Date();
+  const ws = weekStartMonday(now);
+  const nextWs = new Date(ws); nextWs.setDate(nextWs.getDate() + 7);
+  const lastWs = new Date(ws); lastWs.setDate(lastWs.getDate() - 7);
+
+  const totalSessions = await getTotalSessionCount();
+  const thisWeekVolume = await getVolumeBetween(toISODate(ws), toISODate(nextWs));
+  const lastWeekVolume = await getVolumeBetween(toISODate(lastWs), toISODate(ws));
+  const topPBs = await getTopPBs(5);
+
+  return { totalSessions, thisWeekVolume, lastWeekVolume, topPBs };
+}
+
 /**
  * Returns true if the user's most recent prior session for this
  * exercise had at least 3 sets all with reps ≥ 12 — a heuristic

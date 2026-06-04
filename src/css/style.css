@@ -573,3 +573,77 @@ jeep-sqlite {
   padding: 14px;
   margin-bottom: 4px;
 }
+
+/* ─── Mini dashboard ─── */
+.dash-grid {
+  display: flex;
+  gap: 10px;
+}
+
+.dash-grid .stat {
+  flex: 1;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  text-align: center;
+}
+
+.dash-grid .stat-num {
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 800;
+  font-size: 26px;
+  color: var(--text-primary);
+  line-height: 1.1;
+}
+
+.dash-grid .stat-unit {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+
+.dash-grid .stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 4px;
+}
+
+.dash-delta.up { color: var(--success-fg); }
+.dash-delta.down { color: var(--danger-fg); }
+.dash-delta.flat { color: var(--text-muted); }
+
+.dash-pbs {
+  margin-top: 12px;
+}
+
+.dash-pbs .pb-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 14px;
+}
+
+.dash-pbs .pb-row:last-child {
+  border-bottom: none;
+}
+
+/* ─── Stopwatch ─── */
+#stopwatch-display {
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 800;
+  font-size: 56px;
+  text-align: center;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+#btn-sw-start {
+  min-width: 110px;
+}

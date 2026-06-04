@@ -31,7 +31,8 @@ import {
   getLastSessionSetsForExercise,
   getTopSetsForExercise,
   listOrphanExerciseNames,
-  mergeExerciseName
+  mergeExerciseName,
+  getDashboardStats
 } from "./db.js";
 import { WEIGHT_INPUT_HINTS } from "./templates.js";
 
@@ -126,6 +127,66 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) renderRestTimer();
 });
 
+/* --------------------------------------------------
+   Standalone stopwatch (Timer tab)
+   Wall-clock based: accumulates elapsed ms and tracks
+   the current run's start timestamp, so backgrounding
+   the app never loses time.
+-------------------------------------------------- */
+let swRunning = false;
+let swStartAt = null;   // Date.now() when current run began
+let swAccumMs = 0;      // elapsed ms banked from previous runs
+let swTickInterval = null;
+
+function swElapsedMs() {
+  return swAccumMs + (swRunning && swStartAt != null ? Date.now() - swStartAt : 0);
+}
+
+function renderStopwatch() {
+  const display = document.getElementById("stopwatch-display");
+  if (!display) return;
+  const ms = swElapsedMs();
+  const totalSec = Math.floor(ms / 1000);
+  const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
+  const ss = String(totalSec % 60).padStart(2, "0");
+  const tenths = Math.floor((ms % 1000) / 100);
+  display.textContent = `${mm}:${ss}.${tenths}`;
+}
+
+function toggleStopwatch() {
+  const btn = document.getElementById("btn-sw-start");
+  if (swRunning) {
+    // Pause
+    swAccumMs += Date.now() - swStartAt;
+    swStartAt = null;
+    swRunning = false;
+    if (swTickInterval) { clearInterval(swTickInterval); swTickInterval = null; }
+    if (btn) btn.textContent = "Start";
+  } else {
+    // Start / resume
+    swStartAt = Date.now();
+    swRunning = true;
+    if (swTickInterval) clearInterval(swTickInterval);
+    swTickInterval = setInterval(renderStopwatch, 100);
+    if (btn) btn.textContent = "Pause";
+  }
+  renderStopwatch();
+}
+
+function resetStopwatch() {
+  swRunning = false;
+  swStartAt = null;
+  swAccumMs = 0;
+  if (swTickInterval) { clearInterval(swTickInterval); swTickInterval = null; }
+  const btn = document.getElementById("btn-sw-start");
+  if (btn) btn.textContent = "Start";
+  renderStopwatch();
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && swRunning) renderStopwatch();
+});
+
 function todayISO() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -175,22 +236,80 @@ async function updateLiveDot() {
 // DB, offer a one-tap way back into it.
 async function renderSessionIdle() {
   const banner = document.getElementById("resume-banner");
-  if (!banner) return;
-  const activeId = await getActiveSessionId();
-  if (!activeId) {
-    banner.style.display = "none";
-    banner.innerHTML = "";
+  if (banner) {
+    const activeId = await getActiveSessionId();
+    if (!activeId) {
+      banner.style.display = "none";
+      banner.innerHTML = "";
+    } else {
+      const d = await getSessionDetail(activeId);
+      banner.innerHTML = `<button id="btn-resume">▶ Resume ${d.focus.toUpperCase()} — ${d.date}</button>`;
+      banner.style.display = "block";
+      document.getElementById("btn-resume")?.addEventListener("click", async () => {
+        selectedSessionId = activeId;
+        setSelectedSessionUI(d);
+        await renderSelectedSessionExercises(activeId);
+        showView("session");
+      });
+    }
+  }
+  await renderMiniDashboard();
+}
+
+// Mini dashboard on the Session idle screen: total sessions, this-week
+// vs last-week volume, and the top 5 PBs.
+async function renderMiniDashboard() {
+  const el = document.getElementById("mini-dashboard");
+  if (!el) return;
+  let stats;
+  try {
+    stats = await getDashboardStats();
+  } catch (e) {
+    logLine("⚠️ dashboard stats failed:", String(e));
+    el.innerHTML = "";
     return;
   }
-  const d = await getSessionDetail(activeId);
-  banner.innerHTML = `<button id="btn-resume">▶ Resume ${d.focus.toUpperCase()} — ${d.date}</button>`;
-  banner.style.display = "block";
-  document.getElementById("btn-resume")?.addEventListener("click", async () => {
-    selectedSessionId = activeId;
-    setSelectedSessionUI(d);
-    await renderSelectedSessionExercises(activeId);
-    showView("session");
-  });
+
+  const { totalSessions, thisWeekVolume, lastWeekVolume, topPBs } = stats;
+
+  // Week-over-week delta arrow.
+  let delta = `<span class="dash-delta flat">–</span>`;
+  if (lastWeekVolume > 0) {
+    const pct = Math.round(((thisWeekVolume - lastWeekVolume) / lastWeekVolume) * 100);
+    if (pct > 0) delta = `<span class="dash-delta up">▲ ${pct}%</span>`;
+    else if (pct < 0) delta = `<span class="dash-delta down">▼ ${Math.abs(pct)}%</span>`;
+  } else if (thisWeekVolume > 0) {
+    delta = `<span class="dash-delta up">▲ new</span>`;
+  }
+
+  const pbsHtml = (topPBs || []).length
+    ? topPBs
+        .map(
+          (p) =>
+            `<div class="pb-row"><span>${p.name}</span><span class="badge pb-badge">${p.pb}kg</span></div>`
+        )
+        .join("")
+    : `<div class="muted">No PBs logged yet.</div>`;
+
+  el.innerHTML = `
+    <div class="section">
+      <h2>Dashboard</h2>
+      <div class="dash-grid">
+        <div class="stat">
+          <div class="stat-num">${totalSessions}</div>
+          <div class="stat-label">sessions</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num">${thisWeekVolume.toLocaleString()}<span class="stat-unit">kg</span></div>
+          <div class="stat-label">this week ${delta}</div>
+        </div>
+      </div>
+      <div class="dash-pbs">
+        <div class="muted" style="margin-bottom:4px;">Top PBs</div>
+        ${pbsHtml}
+      </div>
+    </div>
+  `;
 }
 
 function setSelectedSessionUI(session) {
@@ -481,6 +600,25 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
           ? String(r.lastSet.reps) : "";
         const lastUnit = r.lastSet?.weight_unit === "lbs" ? "lbs" : "kg";
 
+        // Warm-up suggestion (Option B): the FIRST set of an exercise in a
+        // session shouldn't default to the working/PB weight. If a PB is
+        // known, pre-fill ~60% of it (rounded to 2.5, in the unit normally
+        // used for this lift) as a warm-up cue. Once any set is logged this
+        // session, the normal last-set prefill resumes.
+        let prefillW = lastW;
+        let warmupHint = "";
+        const isFirstSetThisSession = !(r.sets && r.sets.length);
+        if (isFirstSetThisSession && r.pb) {
+          const warmKg = r.pb * 0.6;
+          const warmDisplay = lastUnit === "lbs"
+            ? Math.round((warmKg / 0.45359237) / 2.5) * 2.5
+            : Math.round(warmKg / 2.5) * 2.5;
+          if (Number.isFinite(warmDisplay) && warmDisplay > 0) {
+            prefillW = String(warmDisplay);
+            warmupHint = `<div class="muted" style="margin-top:4px; font-size:12px;">🔥 Warm-up first — ~${warmDisplay}${lastUnit} (60% of PB), then build to working weight.</div>`;
+          }
+        }
+
         const setBtns = r.is_unilateral
           ? `<button data-action="add-set" data-seid="${r.id}" data-side="L" class="tiny">+ L</button>
              <button data-action="add-set" data-seid="${r.id}" data-side="R" class="tiny">+ R</button>`
@@ -494,12 +632,13 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
 
         addRow = `
     ${weightHint}
+    ${warmupHint}
     <div class="row" style="margin-top: 10px;">
       <input
         data-weight-for="${r.id}"
         inputmode="decimal"
         placeholder="weight"
-        value="${lastW}"
+        value="${prefillW}"
         style="width: 60px;"
       />
       <select data-weight-unit-for="${r.id}" style="width: 56px;">
@@ -964,6 +1103,10 @@ async function safeStart() {
     document.getElementById("btn-add-15s")?.addEventListener("click", () => {
       addRestTime(15);
     });
+
+    // Standalone stopwatch (Timer tab)
+    document.getElementById("btn-sw-start")?.addEventListener("click", toggleStopwatch);
+    document.getElementById("btn-sw-reset")?.addEventListener("click", resetStopwatch);
 
     refreshBtn?.addEventListener("click", async () => {
       try {

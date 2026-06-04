@@ -170,8 +170,15 @@
          ============================================================ -->
     <section class="view" id="view-timer" style="display:none;">
       <div class="section">
-        <h2>Timer</h2>
-        <div class="muted">Coming soon — a standalone stopwatch / interval timer.</div>
+        <h2>Stopwatch</h2>
+        <div id="stopwatch-display">00:00.0</div>
+        <div class="row" style="justify-content:center; gap:10px; margin-top:14px;">
+          <button id="btn-sw-start">Start</button>
+          <button id="btn-sw-reset" class="linkbtn">Reset</button>
+        </div>
+        <div class="muted" style="text-align:center; margin-top:12px;">
+          Runs on wall-clock time — keeps counting if you switch apps.
+        </div>
       </div>
     </section>
 
