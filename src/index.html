@@ -27,23 +27,30 @@
              but the user has navigated to the idle view -->
         <div id="resume-banner" style="display:none;"></div>
 
-        <!-- Mini dashboard placeholder (filled in a later increment) -->
-        <div id="mini-dashboard"></div>
-
         <!-- Create session -->
         <div class="section">
           <h2>Create session</h2>
           <div class="row">
             <input id="session-date" type="date" />
             <select id="session-focus">
-              <option value="upper_a">Upper A</option>
-              <option value="lower_a">Lower A</option>
-              <option value="push">Push</option>
-              <option value="pull">Pull</option>
-              <option value="lower_b">Lower B</option>
-              <option value="mixed">Mixed</option>
-              <option value="cardio">Cardio</option>
-              <option value="other">Other</option>
+              <optgroup label="5-Day Split">
+                <option value="upper_a">Upper A</option>
+                <option value="lower_a">Lower A</option>
+                <option value="push">Push</option>
+                <option value="pull">Pull</option>
+                <option value="lower_b">Lower B</option>
+              </optgroup>
+              <optgroup label="4-Day Split">
+                <option value="fourday_back">4-Day Back/Ham</option>
+                <option value="fourday_push">4-Day Push</option>
+                <option value="fourday_lower">4-Day Lower</option>
+                <option value="fourday_pull">4-Day Pull/Upper</option>
+              </optgroup>
+              <optgroup label="Other">
+                <option value="mixed">Mixed</option>
+                <option value="cardio">Cardio</option>
+                <option value="other">Other</option>
+              </optgroup>
             </select>
           </div>
           <div class="row" style="margin-top:10px;">
@@ -53,6 +60,41 @@
           <div class="row" style="margin-top:10px;">
             <button id="btn-export-data">Export Data (CSV + JSON)</button>
           </div>
+        </div>
+
+        <!-- Custom sessions: build/save your own templates (item 7),
+             share them or import a partner's file (item 8). -->
+        <div class="section">
+          <details id="custom-sessions-tool">
+            <summary>🏗 My custom sessions</summary>
+
+            <div id="custom-templates-list" style="margin-top:10px;"></div>
+
+            <div style="margin-top:14px;">
+              <div class="muted" style="margin-bottom:6px;">Build a new session</div>
+              <input id="custom-tpl-name" type="text" placeholder="Session name" style="width:100%;" />
+
+              <div class="row" style="margin-top:8px;">
+                <input id="custom-tpl-exercise" type="text" list="exercise-datalist"
+                  placeholder="Add exercise..." style="flex:1;" autocomplete="off" />
+                <button id="btn-custom-add-exercise" class="tiny">Add</button>
+              </div>
+              <datalist id="exercise-datalist"></datalist>
+
+              <div id="custom-tpl-exercises" class="row"
+                style="gap:6px; margin-top:8px; flex-wrap:wrap;"></div>
+
+              <div class="row" style="margin-top:12px;">
+                <button id="btn-custom-save">Save session</button>
+              </div>
+            </div>
+
+            <div style="margin-top:14px; border-top:1px solid var(--border-soft); padding-top:12px;">
+              <button id="btn-import-template" class="linkbtn">📥 Import session from file</button>
+              <input id="import-file-input" type="file" accept="application/json,.json"
+                style="display:none;" />
+            </div>
+          </details>
         </div>
 
         <!-- One-shot maintenance tool: merge old exercise names -->
@@ -156,13 +198,24 @@
     </section>
 
     <!-- ============================================================
-         LIBRARY TAB — stub (exercises + videos, later increment)
+         LIBRARY TAB — exercise list + detail with videos + tips
          ============================================================ -->
     <section class="view" id="view-library" style="display:none;">
-      <div class="section">
-        <h2>Exercise library</h2>
-        <div class="muted">Coming soon — every exercise, with form-check videos.</div>
+      <div id="library-list">
+        <!-- dynamically rendered exercise rows -->
       </div>
+
+      <div id="library-detail" style="display:none;">
+        <button id="btn-library-back" class="linkbtn tiny">◀ Back to library</button>
+        <div id="library-exercise-detail" style="margin-top:14px;"></div>
+      </div>
+    </section>
+
+    <!-- ============================================================
+         DASHBOARD TAB — dedicated stats screen (item 10)
+         ============================================================ -->
+    <section class="view" id="view-dashboard" style="display:none;">
+      <div id="dashboard-content"></div>
     </section>
 
     <!-- ============================================================
@@ -192,6 +245,10 @@
       <span class="nav-icon">🏋</span>
       <span>Session</span>
       <span class="live-dot"></span>
+    </button>
+    <button data-nav="dashboard">
+      <span class="nav-icon">📊</span>
+      <span>Stats</span>
     </button>
     <button data-nav="history">
       <span class="nav-icon">📅</span>

@@ -7,6 +7,11 @@ export const SESSION_TYPES = [
   "push",
   "pull",
   "lower_b",
+  // Rith's 4-day split (added alongside the 5-day split, not replacing it)
+  "fourday_back",
+  "fourday_push",
+  "fourday_lower",
+  "fourday_pull",
   "mixed",
   "cardio",
   "other",
@@ -18,6 +23,10 @@ export const SESSION_LABELS = {
   push: "Push",
   pull: "Pull",
   lower_b: "Lower B",
+  fourday_back: "4-Day Back/Ham",
+  fourday_push: "4-Day Push",
+  fourday_lower: "4-Day Lower",
+  fourday_pull: "4-Day Pull/Upper",
   mixed: "Mixed",
   cardio: "Cardio",
   other: "Other",
@@ -36,7 +45,44 @@ export const UNILATERAL_EXERCISES = [
   // so log L and R independently.
   "Hammer curl",
   "Dumbbell preacher curl",
+  // Item 9 — the three lifts Ben explicitly wants logged per-side.
+  // "Single-leg lying leg curl" already covered above.
+  "Dumbbell hammer curl",
+  "Lateral raises",
 ];
+
+// Declarative measurement-type map: exercise_name → measurement_type.
+// Applied idempotently at init (see db.applyMeasurementTypes) and when an
+// exercise is added to a session. This is the single source of truth for
+// which exercises are time/cardio/hold-based rather than weight+reps — it
+// replaces the old ad-hoc, name-exact hardcoded corrections that missed
+// variants like "Bike warm-up".
+//   weight_reps  (default) — weight + reps
+//   time_only               — duration only (e.g. stationary bike)
+//   cardio                  — duration + distance (treadmill, rower…)
+//   weight_time             — weight + duration (weighted planks / holds)
+//   notes_only              — no sets (stretch / mobility)
+export const MEASUREMENT_TYPES = {
+  // Duration-based conditioning
+  "Bike": "time_only",
+  "Bike warm-up": "time_only",
+  "Treadmill": "cardio",
+  "Rowing machine": "cardio",
+  "Elliptical": "cardio",
+  "Stair climber": "cardio",
+  // Weighted holds — capture BOTH load and time; PB tracks the load
+  "Core hold": "weight_time",
+  "Plank": "weight_time",
+  "Side plank": "weight_time",
+  "Dead hang": "weight_time",
+  // Non-loaded prep work — no sets to log
+  "Warm-up": "notes_only",
+  "Light warm-up stretches": "notes_only",
+  "Dynamic warm-up": "notes_only",
+  "Cool-down stretch": "notes_only",
+  "Mobility work": "notes_only",
+  "Hip band warm-up": "notes_only",
+};
 
 // Per-exercise hint shown next to the weight input. Used to disambiguate
 // "weight per hand" vs "total" for exercises where the convention isn't obvious.
@@ -53,7 +99,7 @@ export const TEMPLATES = {
     label: "Upper A",
     exercises: [
       { name: "Smith machine incline press 15°", sets: 3, reps: "6-8", rest_sec: 180, weight_kg: 50, rir: "0-1" },
-      { name: "Seated incline press machine", sets: 3, reps: "8-10", rest_sec: 150, weight_kg: 25, rir: "0-1" },
+      { name: "Seated high incline press machine", sets: 3, reps: "8-10", rest_sec: 150, weight_kg: 25, rir: "0-1" },
       { name: "Cable chest fly", sets: 3, reps: "8-12", rest_sec: 180, weight_kg: 10, rir: "0-1" },
       { name: "Single-arm lat pulldown", sets: 3, reps: "6-8", rest_sec: 180, weight_kg: 45, rir: "0-1" },
       { name: "Single-arm cable row", sets: 3, reps: "8-10", rest_sec: 180, weight_kg: 45, rir: "0-1" },
@@ -110,6 +156,65 @@ export const TEMPLATES = {
       { name: "Walking lunges", sets: 3, reps: "20 step", rest_sec: 180, weight_kg: null, rir: "0-1" },
       { name: "Abductor machine", sets: 3, reps: "12", rest_sec: 180, weight_kg: null, rir: "0-1" },
       { name: "Seated calf raise", sets: 3, reps: "10", rest_sec: 180, weight_kg: null, rir: "0-1" },
+    ],
+  },
+
+  // ----------------------------------------------------------------
+  // Rith's 4-day split (2026-07). No baseline weights yet — weight_kg
+  // left null so nothing is pre-filled and Ben logs fresh each lift.
+  // Exercise names map to existing canonical names where possible so PB
+  // history carries over; genuinely new movements were added to the seed.
+  // ----------------------------------------------------------------
+  fourday_back: {
+    label: "4-Day Back/Ham",
+    exercises: [
+      { name: "Barbell RDL", sets: 2, reps: "6-8", rest_sec: 120, weight_kg: null },
+      { name: "Single-leg lying leg curl", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Dumbbell row", sets: 2, reps: "6-8", rest_sec: 120, weight_kg: null },
+      { name: "Pull-ups", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Single-arm lat pulldown", sets: 2, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Rear delt fly", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Dumbbell preacher curl", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+    ],
+  },
+
+  fourday_push: {
+    label: "4-Day Push",
+    exercises: [
+      { name: "Smith machine incline press 15°", sets: 3, reps: "6-8", rest_sec: 120, weight_kg: null },
+      { name: "Dumbbell bench press", sets: 2, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Chest fly machine", sets: 3, reps: "10-12", rest_sec: 120, weight_kg: null },
+      { name: "High incline press", sets: 2, reps: "6-8", rest_sec: 120, weight_kg: null },
+      { name: "Lateral raises", sets: 3, reps: "10-12", rest_sec: 120, weight_kg: null },
+      { name: "Tricep rope pushdown", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+    ],
+  },
+
+  fourday_lower: {
+    label: "4-Day Lower",
+    exercises: [
+      { name: "Seated leg curl", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Adductor machine", sets: 2, reps: "10-12", rest_sec: 120, weight_kg: null },
+      { name: "Smith machine Squat", sets: 2, reps: "6-8", rest_sec: 120, weight_kg: null },
+      { name: "Leg press", sets: 2, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Bulgarian split squat", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Abductor machine", sets: 2, reps: "12-15", rest_sec: 120, weight_kg: null },
+      { name: "Seated calf raise", sets: 2, reps: "10-15", rest_sec: 120, weight_kg: null },
+    ],
+  },
+
+  fourday_pull: {
+    label: "4-Day Pull/Upper",
+    exercises: [
+      { name: "Close-grip pull-up", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Single-arm cable row", sets: 2, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Reverse-grip lat pulldown", sets: 2, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Floor press", sets: 2, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Seated high incline press machine", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Face pull", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Lying lateral raise", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Overhead tricep extension", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
+      { name: "Decline cable bicep curl", sets: 3, reps: "8-10", rest_sec: 120, weight_kg: null },
     ],
   },
 

@@ -23,7 +23,6 @@ import {
   insertSet,
   deleteSet,
   updateSet,
-  setExerciseMeasurementType,
   getLatestSetForExercise,
   getPersonalBest,
   getSessionVolume,
@@ -32,15 +31,43 @@ import {
   getTopSetsForExercise,
   listOrphanExerciseNames,
   mergeExerciseName,
-  getDashboardStats
+  getDashboardStats,
+  createCustomTemplate,
+  listCustomTemplates,
+  deleteCustomTemplate
 } from "./db.js";
-import { WEIGHT_INPUT_HINTS } from "./templates.js";
+import { WEIGHT_INPUT_HINTS, SESSION_LABELS } from "./templates.js";
+import { LIBRARY_CONTENT } from "./library-content.js";
+import {
+  exportCustomTemplate,
+  exportSessionAsTemplate,
+  importTemplateFromText
+} from "./session-io.js";
 
 let selectedSessionId = null;
 // Tracks the session_exercise the user most recently logged a set on,
 // so we can float it to the top of the list (keeps the active exercise
 // next to the rest timer). Reset when leaving a session.
 let lastActiveSessionExerciseId = null;
+
+// In-memory id→name cache for custom templates, so session headers can
+// show a friendly label instead of the raw focus="custom:<id>" key
+// without an async lookup on every render. Refreshed whenever templates
+// are (re)loaded.
+let customTemplateNames = {};
+
+// Draft exercise list for the custom-session builder (item 7).
+let customBuilderExercises = [];
+
+// Human label for a session's focus. Handles the static 5-day/4-day keys
+// plus custom templates (focus="custom:<id>").
+function focusLabel(focus) {
+  if (typeof focus === "string" && focus.startsWith("custom:")) {
+    const id = focus.slice("custom:".length);
+    return customTemplateNames[id] || "Custom";
+  }
+  return SESSION_LABELS[focus] || focus || "";
+}
 
 const logEl = document.getElementById("log");
 
@@ -202,7 +229,7 @@ function todayISO() {
    divs — it never touches the DB, so navigating away
    from an active session simply *suspends* it.
 -------------------------------------------------- */
-const VIEWS = ["session", "history", "library", "timer"];
+const VIEWS = ["session", "dashboard", "history", "library", "timer"];
 
 function showView(name) {
   for (const v of VIEWS) {
@@ -243,7 +270,7 @@ async function renderSessionIdle() {
       banner.innerHTML = "";
     } else {
       const d = await getSessionDetail(activeId);
-      banner.innerHTML = `<button id="btn-resume">▶ Resume ${d.focus.toUpperCase()} — ${d.date}</button>`;
+      banner.innerHTML = `<button id="btn-resume">▶ Resume ${focusLabel(d.focus).toUpperCase()} — ${d.date}</button>`;
       banner.style.display = "block";
       document.getElementById("btn-resume")?.addEventListener("click", async () => {
         selectedSessionId = activeId;
@@ -253,20 +280,148 @@ async function renderSessionIdle() {
       });
     }
   }
-  await renderMiniDashboard();
+  await refreshCustomSessions();
 }
 
-// Mini dashboard on the Session idle screen: total sessions, this-week
-// vs last-week volume, and the top 5 PBs.
-async function renderMiniDashboard() {
-  const el = document.getElementById("mini-dashboard");
+/* --------------------------------------------------
+   Custom sessions (items 7 & 8)
+   - refreshCustomSessions: reload cache, dropdown options, saved list,
+     and the exercise autocomplete datalist
+   - the builder draft lives in customBuilderExercises
+-------------------------------------------------- */
+async function refreshCustomSessions() {
+  const templates = await listCustomTemplates();
+
+  // Refresh the id→name cache used by focusLabel().
+  customTemplateNames = {};
+  for (const t of templates) customTemplateNames[String(t.id)] = t.name;
+
+  populateFocusDropdown(templates);
+  renderCustomTemplatesList(templates);
+  await populateExerciseDatalist();
+}
+
+// Append a "My sessions" optgroup of saved custom templates to the
+// Create-session dropdown, so they start exactly like a built-in split.
+function populateFocusDropdown(templates) {
+  const sel = document.getElementById("session-focus");
+  if (!sel) return;
+  sel.querySelector('optgroup[data-custom="1"]')?.remove();
+  if (!templates.length) return;
+  const og = document.createElement("optgroup");
+  og.label = "My sessions";
+  og.setAttribute("data-custom", "1");
+  for (const t of templates) {
+    const opt = document.createElement("option");
+    opt.value = `custom:${t.id}`;
+    opt.textContent = t.name;
+    og.appendChild(opt);
+  }
+  sel.appendChild(og);
+}
+
+// Render saved custom templates with Start / Share / Delete controls.
+function renderCustomTemplatesList(templates) {
+  const el = document.getElementById("custom-templates-list");
   if (!el) return;
+  if (!templates.length) {
+    el.innerHTML = `<div class="muted">No custom sessions yet. Build one below.</div>`;
+    return;
+  }
+  el.innerHTML = templates
+    .map(
+      (t) => `
+      <div class="card" style="margin-bottom:8px;">
+        <div><strong>${t.name}</strong> <span class="muted">— ${t.exercise_count} exercises</span></div>
+        <div class="row" style="margin-top:8px; gap:8px;">
+          <button class="linkbtn tiny" data-tpl-start="${t.id}">▶ Start</button>
+          <button class="linkbtn tiny" data-tpl-share="${t.id}">📤 Share</button>
+          <button class="danger tiny" data-tpl-delete="${t.id}">🗑</button>
+        </div>
+      </div>`
+    )
+    .join("");
+
+  el.querySelectorAll("[data-tpl-start]").forEach((b) =>
+    b.addEventListener("click", () => startCustomSession(Number(b.getAttribute("data-tpl-start"))))
+  );
+  el.querySelectorAll("[data-tpl-share]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        await exportCustomTemplate(Number(b.getAttribute("data-tpl-share")), { log: logLine });
+      } catch (e) {
+        logLine("❌ Share template failed:", String(e));
+      }
+    })
+  );
+  el.querySelectorAll("[data-tpl-delete]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const id = Number(b.getAttribute("data-tpl-delete"));
+      if (!window.confirm("Delete this custom session?")) return;
+      await deleteCustomTemplate(id, logLine);
+      await refreshCustomSessions();
+    })
+  );
+}
+
+// Fill the <datalist> that powers the builder's exercise autocomplete.
+async function populateExerciseDatalist() {
+  const dl = document.getElementById("exercise-datalist");
+  if (!dl) return;
+  const exercises = await listExercises(1000);
+  dl.innerHTML = exercises.map((e) => `<option value="${e.name}"></option>`).join("");
+}
+
+// Create + start a session from a saved custom template.
+async function startCustomSession(templateId) {
+  try {
+    const date = document.getElementById("session-date")?.value || todayISO();
+    const id = await createSession({ date, focus: `custom:${templateId}`, notes: "" });
+    selectedSessionId = id;
+    await preloadTemplateExercises(id, `custom:${templateId}`, logLine);
+    const detail = await getSessionDetail(id);
+    setSelectedSessionUI(detail);
+    await renderSelectedSessionExercises(selectedSessionId);
+    await updateLiveDot();
+    showView("session");
+    await refreshSessionsList();
+  } catch (e) {
+    logLine("❌ Start custom session failed:", String(e));
+  }
+}
+
+// Re-render the builder's draft exercise chips.
+function renderCustomBuilderChips() {
+  const el = document.getElementById("custom-tpl-exercises");
+  if (!el) return;
+  el.innerHTML = customBuilderExercises
+    .map(
+      (name, i) =>
+        `<span class="badge" style="cursor:pointer;" data-chip-remove="${i}">${name} ✕</span>`
+    )
+    .join("");
+  el.querySelectorAll("[data-chip-remove]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const i = Number(b.getAttribute("data-chip-remove"));
+      customBuilderExercises.splice(i, 1);
+      renderCustomBuilderChips();
+    })
+  );
+}
+
+/* --------------------------------------------------
+   Dashboard tab (item 10) — dedicated stats screen
+-------------------------------------------------- */
+async function renderDashboard() {
+  const el = document.getElementById("dashboard-content");
+  if (!el) return;
+
   let stats;
   try {
     stats = await getDashboardStats();
   } catch (e) {
     logLine("⚠️ dashboard stats failed:", String(e));
-    el.innerHTML = "";
+    el.innerHTML = `<div class="section"><div class="muted">No stats yet.</div></div>`;
     return;
   }
 
@@ -291,25 +446,194 @@ async function renderMiniDashboard() {
         .join("")
     : `<div class="muted">No PBs logged yet.</div>`;
 
+  // Recent sessions strip — a bit more detail than the old mini view.
+  const recent = await listSessions(6);
+  const recentHtml = recent.length
+    ? recent
+        .map((s) => {
+          const badge = s.status === "active" ? "active" : "finished";
+          return `<div class="pb-row">
+              <span>${focusLabel(s.focus)} <span class="muted">— ${s.date}</span></span>
+              <span class="badge ${badge}">${s.status}</span>
+            </div>`;
+        })
+        .join("")
+    : `<div class="muted">No sessions yet.</div>`;
+
   el.innerHTML = `
     <div class="section">
       <h2>Dashboard</h2>
       <div class="dash-grid">
         <div class="stat">
           <div class="stat-num">${totalSessions}</div>
-          <div class="stat-label">sessions</div>
+          <div class="stat-label">total sessions</div>
         </div>
         <div class="stat">
           <div class="stat-num">${thisWeekVolume.toLocaleString()}<span class="stat-unit">kg</span></div>
           <div class="stat-label">this week ${delta}</div>
         </div>
       </div>
-      <div class="dash-pbs">
-        <div class="muted" style="margin-bottom:4px;">Top PBs</div>
-        ${pbsHtml}
+      <div class="dash-grid" style="margin-top:10px;">
+        <div class="stat">
+          <div class="stat-num">${lastWeekVolume.toLocaleString()}<span class="stat-unit">kg</span></div>
+          <div class="stat-label">last week</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num">${(topPBs || []).length}</div>
+          <div class="stat-label">tracked lifts</div>
+        </div>
       </div>
     </div>
+    <div class="section">
+      <h2>Top PBs</h2>
+      <div class="dash-pbs">${pbsHtml}</div>
+    </div>
+    <div class="section">
+      <h2>Recent sessions</h2>
+      <div class="dash-pbs">${recentHtml}</div>
+    </div>
   `;
+}
+
+/* --------------------------------------------------
+   Exercise Library (Library tab)
+   - Static video index (videos/index.json) fetched once and cached
+   - resolveVideoUrl: exercise name → slug → check Set → url or null
+   - renderLibrary: grouped list with search filter
+   - openLibraryExercise: video player + description + tips
+-------------------------------------------------- */
+let availableVideos = new Set();
+
+async function loadVideoIndex() {
+  try {
+    const resp = await fetch("videos/index.json");
+    if (resp.ok) availableVideos = new Set(await resp.json());
+  } catch (_) { /* non-fatal — no videos shown */ }
+}
+
+function resolveVideoUrl(exerciseName) {
+  const slug = exerciseName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-|-$/g, "");
+  const filename = `${slug}.mp4`;
+  return availableVideos.has(filename) ? `videos/${filename}` : null;
+}
+
+// Muscle groups for section headings (order sets render order)
+const LIBRARY_GROUPS = [
+  { label: "Chest",                     exercises: ["Smith machine incline press 15°", "Smith machine bench press", "Smith chest press machine", "Seated chest press machine", "Seated high incline press machine", "Cable chest fly", "Chest fly machine", "High incline press"] },
+  { label: "Back",                      exercises: ["Single-arm lat pulldown", "Single-arm cable row", "T-bar row", "Lean-forward seated cable row", "Face pull"] },
+  { label: "Shoulders",                 exercises: ["Lateral raises", "Lying lateral raise"] },
+  { label: "Arms — Triceps",            exercises: ["Tricep rope pushdown", "Overhead tricep extension", "Single-arm tricep pushdown"] },
+  { label: "Arms — Biceps",             exercises: ["Incline dumbbell curl", "Dumbbell preacher curl", "Hammer curl"] },
+  { label: "Lower — Quads",             exercises: ["Barbell back squat", "Leg press", "Bulgarian split squat", "Single leg press", "Leg extension", "Single-leg extension"] },
+  { label: "Lower — Hamstrings & Glutes", exercises: ["Seated leg curl", "Lying leg curl", "Dumbbell RDL", "Walking lunges"] },
+  { label: "Calves",                    exercises: ["Seated calf raise"] },
+  { label: "Adductors / Abductors",     exercises: ["Adductor machine", "Abductor machine"] },
+];
+
+function renderLibrary(filterQ = "") {
+  const listEl = document.getElementById("library-list");
+  if (!listEl) return;
+
+  const q = filterQ.trim().toLowerCase();
+
+  let html = `
+    <div class="section library-header">
+      <h2>Exercise Library</h2>
+      <input
+        id="library-search"
+        class="library-search"
+        type="search"
+        placeholder="Search exercises…"
+        value="${filterQ.replace(/"/g, "&quot;")}"
+        autocomplete="off"
+      />
+    </div>
+  `;
+
+  for (const group of LIBRARY_GROUPS) {
+    const rows = group.exercises
+      .filter(name => !q || name.toLowerCase().includes(q))
+      .map(name => {
+        const content = LIBRARY_CONTENT[name];
+        const tagline = content?.tagline ?? "";
+        const hasVideo = !!resolveVideoUrl(name);
+        return `
+          <div class="library-row" data-library-exercise="${name.replace(/"/g, "&quot;")}">
+            <div>
+              <div class="library-row-name">${name}</div>
+              ${tagline ? `<div class="library-row-tagline">${tagline}</div>` : ""}
+            </div>
+            ${hasVideo ? `<span class="video-badge">▶ video</span>` : ""}
+          </div>
+        `;
+      });
+
+    if (rows.length === 0) continue;
+
+    html += `<div class="library-group-label">${group.label}</div>`;
+    html += rows.join("");
+  }
+
+  listEl.innerHTML = html;
+
+  // Search input wiring
+  const searchEl = document.getElementById("library-search");
+  searchEl?.addEventListener("input", () => renderLibrary(searchEl.value));
+
+  // Row tap → detail view
+  listEl.querySelectorAll("[data-library-exercise]").forEach(row => {
+    row.addEventListener("click", () => {
+      const name = row.getAttribute("data-library-exercise");
+      openLibraryExercise(name);
+    });
+  });
+}
+
+function openLibraryExercise(name) {
+  const listEl  = document.getElementById("library-list");
+  const detailEl = document.getElementById("library-detail");
+  const contentEl = document.getElementById("library-exercise-detail");
+  if (!listEl || !detailEl || !contentEl) return;
+
+  const content = LIBRARY_CONTENT[name];
+  const videoUrl = resolveVideoUrl(name);
+
+  const videoHtml = videoUrl
+    ? `<video class="exercise-video" src="${videoUrl}" controls playsinline loop preload="metadata"></video>`
+    : "";
+
+  const descHtml = content?.description
+    ? `<p class="exercise-desc">${content.description}</p>`
+    : "";
+
+  const tipsHtml = (content?.tips?.length)
+    ? `<div class="tips-label">Coaching tips</div>
+       <ul class="tips-list">
+         ${content.tips.map(t => `<li>${t}</li>`).join("")}
+       </ul>`
+    : "";
+
+  const noContent = !videoUrl && !content
+    ? `<div class="muted">No notes or video for this exercise yet.</div>`
+    : "";
+
+  contentEl.innerHTML = `
+    <div class="section">
+      <h2>${name}</h2>
+      ${content?.tagline ? `<div class="exercise-tagline">${content.tagline}</div>` : ""}
+      ${videoHtml}
+      ${descHtml}
+      ${tipsHtml}
+      ${noContent}
+    </div>
+  `;
+
+  listEl.style.display = "none";
+  detailEl.style.display = "block";
 }
 
 function setSelectedSessionUI(session) {
@@ -333,7 +657,7 @@ function setSelectedSessionUI(session) {
 
   selectedEl.innerHTML = `
     <div style="display: flex; justify-content: space-between; align-items: center;">
-      <div style="font-family: 'Montserrat', sans-serif; font-size: 20px; font-weight: 700;">${session.focus.toUpperCase()}</div>
+      <div style="font-family: 'Montserrat', sans-serif; font-size: 20px; font-weight: 700;">${focusLabel(session.focus).toUpperCase()}</div>
       <div class="badge ${session.status === 'active' ? 'active' : 'finished'}">${session.status}</div>
     </div>
     <div class="muted" style="margin-top: 4px;">${session.date}</div>
@@ -358,7 +682,7 @@ async function refreshSessionsList() {
     const badge = s.status === "active" ? "active" : "finished";
     div.innerHTML = `
       <div>
-        <strong>${s.focus.toUpperCase()}</strong> — ${s.date}
+        <strong>${focusLabel(s.focus).toUpperCase()}</strong> — ${s.date}
         <span class="badge ${badge}">${s.status}</span>
       </div>
       ${s.notes ? `<div class="muted">${s.notes}</div>` : ""}
@@ -411,10 +735,20 @@ async function openHistorySession(s) {
   const header = document.getElementById("history-session-header");
   if (header) {
     header.innerHTML = `
-      <div style="font-family:'Montserrat',sans-serif; font-size:20px; font-weight:700;">${detail.focus.toUpperCase()}</div>
+      <div style="font-family:'Montserrat',sans-serif; font-size:20px; font-weight:700;">${focusLabel(detail.focus).toUpperCase()}</div>
       <div class="muted" style="margin-top:4px;">${detail.date}</div>
       ${detail.notes ? `<div class="muted">Notes: ${detail.notes}</div>` : ""}
+      <div class="row" style="margin-top:10px;">
+        <button class="linkbtn tiny" data-export-session="${s.id}">📤 Share as template</button>
+      </div>
     `;
+    header.querySelector(`[data-export-session="${s.id}"]`)?.addEventListener("click", async () => {
+      try {
+        await exportSessionAsTemplate(s.id, { log: logLine });
+      } catch (e) {
+        logLine("❌ Share session failed:", String(e));
+      }
+    });
   }
   document.getElementById("history-list").style.display = "none";
   document.getElementById("history-detail").style.display = "block";
@@ -449,7 +783,10 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
     const suggestRaise = await shouldSuggestRaise(r.exercise_name, sessionId);
     const lastSessionSets = await getLastSessionSetsForExercise(r.exercise_name, sessionId);
     const topSets = await getTopSetsForExercise(r.exercise_name, sessionId, 5);
-    rowsDetailed.push({ ...r, sets, pb, lastSet, suggestRaise, lastSessionSets, topSets });
+    // orderIdx = rank in the session's intended sequence (rows arrive
+    // position-ordered). Item 3: the warm-up cue is only relevant for the
+    // first two exercises of a session, not every lift.
+    rowsDetailed.push({ ...r, sets, pb, lastSet, suggestRaise, lastSessionSets, topSets, orderIdx: rowsDetailed.length });
   }
 
   // Float the last-active exercise to the top so it stays visible next
@@ -493,6 +830,16 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
               } else {
                 label += " — time";
               }
+            } else if (r.measurement_type === "weight_time") {
+              // Weighted hold: show load AND duration. PB tracks the load.
+              const parts = [];
+              if (w !== "") parts.push(`${w}${unit}`);
+              if (duration !== "") {
+                const mm = Math.floor(duration / 60);
+                const ss = String(duration % 60).padStart(2, "0");
+                parts.push(`${mm}:${ss}`);
+              }
+              label += parts.length ? ` — ${parts.join(" × ")}` : " — hold";
             } else if (r.measurement_type === "cardio") {
               const dist = (s.distance_m === null || s.distance_m === undefined) ? "NA" : `${s.distance_m}m`;
               if (duration !== "") {
@@ -510,7 +857,9 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
 
             // Edit form is only offered for weight_reps sets; time/cardio
             // are simpler to delete-and-re-add.
-            const editable = r.measurement_type !== "time_only" && r.measurement_type !== "cardio";
+            const editable = r.measurement_type !== "time_only"
+              && r.measurement_type !== "cardio"
+              && r.measurement_type !== "weight_time";
             const sideOpts = `
               <option value="" ${!s.side ? "selected" : ""}>—</option>
               <option value="L" ${s.side === "L" ? "selected" : ""}>L</option>
@@ -583,6 +932,45 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       </button>
     </div>
   `;
+      } else if (r.measurement_type === "weight_time") {
+        // Weighted hold (item 4): capture BOTH load and duration. PB is
+        // tracked off the weight, so pre-fill the last-used load + unit.
+        const lastW = (r.lastSet?.weight !== null && r.lastSet?.weight !== undefined)
+          ? String(r.lastSet.weight) : "";
+        const lastUnit = r.lastSet?.weight_unit === "lbs" ? "lbs" : "kg";
+        addRow = `
+    <div class="row" style="margin-top: 10px;">
+      <input
+        data-weight-for="${r.id}"
+        inputmode="decimal"
+        placeholder="weight"
+        value="${lastW}"
+        style="width: 60px;"
+      />
+      <select data-weight-unit-for="${r.id}" style="width: 56px;">
+        <option value="kg" ${lastUnit === "kg" ? "selected" : ""}>kg</option>
+        <option value="lbs" ${lastUnit === "lbs" ? "selected" : ""}>lbs</option>
+      </select>
+      <input
+        data-duration-for="${r.id}"
+        inputmode="numeric"
+        placeholder="seconds"
+        style="width: 90px;"
+      />
+      <button
+        data-action="add-weight-time-set"
+        data-seid="${r.id}"
+        class="tiny">
+        + Set
+      </button>
+      <button
+        data-action="delete-exercise"
+        data-seid="${r.id}"
+        class="danger tiny">
+        ✖
+      </button>
+    </div>
+  `;
       } else if (r.measurement_type === "notes_only") {
         addRow = `
     <div class="muted" style="margin-top: 8px;">
@@ -608,7 +996,10 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
         let prefillW = lastW;
         let warmupHint = "";
         const isFirstSetThisSession = !(r.sets && r.sets.length);
-        if (isFirstSetThisSession && r.pb) {
+        // Item 3: warm-up cue only for the first two exercises of the
+        // session — later lifts are already warm.
+        const warmupEligible = r.orderIdx < 2;
+        if (isFirstSetThisSession && warmupEligible && r.pb) {
           const warmKg = r.pb * 0.6;
           const warmDisplay = lastUnit === "lbs"
             ? Math.round((warmKg / 0.45359237) / 2.5) * 2.5
@@ -874,6 +1265,47 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       return;
     }
 
+    if (action === "add-weight-time-set") {
+      // Weighted hold (item 4): store BOTH load and duration in one set.
+      const sessionExerciseId = Number(btn.getAttribute("data-seid"));
+      const wEl = container.querySelector(`input[data-weight-for="${sessionExerciseId}"]`);
+      const uEl = container.querySelector(`select[data-weight-unit-for="${sessionExerciseId}"]`);
+      const dEl = container.querySelector(`input[data-duration-for="${sessionExerciseId}"]`);
+
+      const weightRaw = (wEl?.value ?? "").trim();
+      const durationRaw = (dEl?.value ?? "").trim();
+
+      const weight = weightRaw === "" ? null : Number(weightRaw);
+      const durationSec = durationRaw === "" ? null : Number(durationRaw);
+
+      if (weightRaw !== "" && (!Number.isFinite(weight) || weight < 0)) {
+        logLine("⚠️ Invalid weight value.");
+        return;
+      }
+      if (durationRaw !== "" && (!Number.isFinite(durationSec) || durationSec < 0)) {
+        logLine("⚠️ Invalid seconds value.");
+        return;
+      }
+
+      await insertSet({
+        sessionExerciseId,
+        weight,
+        weight_unit: weight === null ? null : (uEl?.value || "kg"),
+        duration_sec: durationSec,
+        reps: null,
+        distance_m: null,
+        assisted: 0,
+        notes: null
+      });
+
+      if (dEl) dEl.value = "";
+
+      lastActiveSessionExerciseId = sessionExerciseId;
+      startRestTimer();
+      await renderSelectedSessionExercises(sessionId, container);
+      return;
+    }
+
     if (action === "delete-set") {
       const setId = Number(btn.getAttribute("data-setid"));
       await deleteSet(setId);
@@ -1000,6 +1432,7 @@ async function safeStart() {
       await initSqliteWeb(logLine);
     }
 
+    await loadVideoIndex();
     await initDb(logLine);
 
     try {
@@ -1010,8 +1443,10 @@ async function safeStart() {
       logLine("⚠️ Exercise seed/list failed (non-fatal):", String(e));
     }
 
-    // Phase G — semantic correction (idempotent)
-    await setExerciseMeasurementType("Bike", "time_only");
+    // Measurement types are now applied declaratively inside initDb via
+    // applyMeasurementTypes() (MEASUREMENT_TYPES map) — the old single
+    // hardcoded "Bike" correction missed real logged variants like
+    // "Bike warm-up" (item 6).
 
     // Default date
     const dateInput = document.getElementById("session-date");
@@ -1061,6 +1496,71 @@ async function safeStart() {
         });
       } catch (e) {
         logLine("❌ Export failed:", String(e));
+      }
+    });
+
+    // ---------------------------
+    // Custom session builder (items 7 & 8)
+    // ---------------------------
+    const addBuilderExercise = () => {
+      const input = document.getElementById("custom-tpl-exercise");
+      const name = (input?.value ?? "").trim();
+      if (!name) return;
+      customBuilderExercises.push(name);
+      if (input) input.value = "";
+      renderCustomBuilderChips();
+    };
+
+    document.getElementById("btn-custom-add-exercise")?.addEventListener("click", addBuilderExercise);
+    document.getElementById("custom-tpl-exercise")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        addBuilderExercise();
+      }
+    });
+
+    document.getElementById("btn-custom-save")?.addEventListener("click", async () => {
+      try {
+        const nameEl = document.getElementById("custom-tpl-name");
+        const name = (nameEl?.value ?? "").trim();
+        if (!name) {
+          logLine("⚠️ Name your custom session first.");
+          return;
+        }
+        if (!customBuilderExercises.length) {
+          logLine("⚠️ Add at least one exercise.");
+          return;
+        }
+        await createCustomTemplate(name, customBuilderExercises.slice(), logLine);
+        // Reset the draft.
+        customBuilderExercises = [];
+        if (nameEl) nameEl.value = "";
+        renderCustomBuilderChips();
+        await refreshCustomSessions();
+        logLine(`✅ Saved custom session "${name}"`);
+      } catch (e) {
+        logLine("❌ Save custom session failed:", String(e));
+      }
+    });
+
+    // Import a shared template file → save as a custom session.
+    const importInput = document.getElementById("import-file-input");
+    document.getElementById("btn-import-template")?.addEventListener("click", () => {
+      importInput?.click();
+    });
+    importInput?.addEventListener("change", async () => {
+      const file = importInput.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const res = await importTemplateFromText(text, { log: logLine });
+        await refreshCustomSessions();
+        logLine(`✅ Imported "${res.name}"`);
+      } catch (e) {
+        logLine("❌ Import failed:", String(e));
+        window.alert(`Import failed: ${e.message || e}`);
+      } finally {
+        importInput.value = "";
       }
     });
 
@@ -1124,7 +1624,9 @@ async function safeStart() {
         const name = btn.getAttribute("data-nav");
         // Refresh per-tab content on entry.
         if (name === "session") await renderSessionIdle();
+        if (name === "dashboard") await renderDashboard();
         if (name === "history") await refreshSessionsList();
+        if (name === "library") renderLibrary();
         showView(name);
       });
     });
@@ -1141,6 +1643,16 @@ async function safeStart() {
       document.getElementById("history-detail").style.display = "none";
       document.getElementById("history-list").style.display = "block";
     });
+
+    // Back from library exercise detail → return to library list.
+    document.getElementById("btn-library-back")?.addEventListener("click", () => {
+      document.getElementById("library-detail").style.display = "none";
+      document.getElementById("library-list").style.display = "block";
+    });
+
+    // Load custom-template name cache before rendering any session header
+    // (so a custom active session shows its real name, not "custom:<id>").
+    await refreshCustomSessions();
 
     // Load active session (if any)
     const activeId = await getActiveSessionId();

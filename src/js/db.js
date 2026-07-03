@@ -1,6 +1,7 @@
 import { CapacitorSQLite, SQLiteConnection } from "@capacitor-community/sqlite";
 import { Capacitor } from "@capacitor/core";
-import { TEMPLATES, UNILATERAL_EXERCISES } from "./templates.js";
+import { Filesystem, Directory, Encoding } from "@capacitor/filesystem";
+import { TEMPLATES, UNILATERAL_EXERCISES, MEASUREMENT_TYPES } from "./templates.js";
 
 const DB_NAME = "gym_log";
 const DB_VERSION = 1;
@@ -34,6 +35,17 @@ export async function initDb(log) {
 
     await conn.open();
     db = conn;
+
+    // Enforce foreign keys so ON DELETE CASCADE actually fires. SQLite
+    // defaults this OFF per-connection; without it, deleting a session
+    // left its session_exercises + sets behind as orphans (the root of
+    // the ghost-PB bug). PRAGMA cannot run inside a transaction, so pass
+    // transaction=false.
+    try {
+      await db.execute(`PRAGMA foreign_keys = ON;`, false);
+    } catch (e) {
+      if (typeof log === "function") log("⚠️ Could not enable foreign_keys:", String(e));
+    }
 
     // -----------------------------
     // Core tables (Phase A)
@@ -109,19 +121,8 @@ export async function initDb(log) {
       }
     }
 
-    // Phase G — semantic correction: Cardio exercises
-    try {
-      await db.run(
-        `UPDATE exercises
-         SET measurement_type = 'cardio'
-         WHERE (name = 'Bike' OR name = 'Treadmill' OR name = 'Trademill' OR name = 'Run')
-           AND (measurement_type IS NULL OR measurement_type = 'weight_reps' OR measurement_type = 'time_only');`
-      );
-      if (typeof log === "function") log("✅ Phase G: ensured cardio exercises are measurement_type=cardio");
-    } catch (e) {
-      const msg = String(e || "").toLowerCase();
-      if (typeof log === "function") log("⚠️ Phase G warning (cardio semantics):", msg);
-    }
+    // (Measurement-type assignment now lives in applyMeasurementTypes(),
+    // driven by the declarative MEASUREMENT_TYPES map — see end of initDb.)
 
     // -----------------------------
     // Session exercises (Phase B-1)
@@ -243,6 +244,37 @@ export async function initDb(log) {
       ON sets(session_exercise_id);
     `);
 
+    // -----------------------------
+    // Custom session templates (Build 2 — item 7)
+    // A saved, reusable list of exercises Ben builds himself. Selectable
+    // in the Create-session dropdown as focus="custom:<id>", and the unit
+    // that item 8 export/import ships around as a shareable file.
+    // -----------------------------
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS custom_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS custom_template_exercises (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_id INTEGER NOT NULL,
+        exercise_name TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (template_id) REFERENCES custom_templates(id) ON DELETE CASCADE
+      );
+    `);
+
+    // Build 1 — idempotent migrations & one-time cleanup. Order matters:
+    // rename before measurement types (so the renamed row gets its type),
+    // and orphan purge last (it backs up the post-rename state).
+    await renameSeatedInclineOnce(log);
+    await applyMeasurementTypes(log);
+    await cleanupOrphansOnce(log);
+
     if (typeof log === "function") log("✅ initDb OK");
     return db;
   } catch (e) {
@@ -276,7 +308,11 @@ export async function clearActiveSessionId() {
    Exercise seed helpers (Phase B-0)
 -------------------------------------------------- */
 
-const SEED_KEY = "seed_exercises_v2";
+// Bumped to v3 when Rith's 4-day split added new canonical exercises
+// (Barbell RDL, Close-grip pull-up, etc.). Re-running the seed is safe —
+// every insert is INSERT OR IGNORE, so existing rows are untouched and
+// only the new names get added on upgrade.
+const SEED_KEY = "seed_exercises_v3";
 
 async function hasSeededExercises() {
   const res = await db.query(
@@ -483,6 +519,7 @@ export async function getPersonalBest(exerciseName) {
      ) as pb
      FROM sets s
      JOIN session_exercises se ON s.session_exercise_id = se.id
+     JOIN sessions sess ON se.session_id = sess.id
      WHERE se.exercise_name = ?
        AND s.weight IS NOT NULL`,
     [exerciseName]
@@ -769,6 +806,7 @@ export async function getTopPBs(limit = 5) {
             MAX(CASE WHEN s.weight_unit = 'lbs' THEN s.weight * 0.45359237 ELSE s.weight END) AS pb
      FROM sets s
      JOIN session_exercises se ON s.session_exercise_id = se.id
+     JOIN sessions sess ON se.session_id = sess.id
      WHERE s.weight IS NOT NULL
      GROUP BY se.exercise_name
      ORDER BY pb DESC
@@ -861,10 +899,31 @@ export async function addExerciseToSession(sessionId, exerciseName, notes = null
     [trimmedName, now]
   );
 
+  // Apply the declarative measurement type (if this name is mapped) so a
+  // just-added time/cardio/hold exercise prompts for the right inputs
+  // immediately — not just after a full re-seed.
+  const mt = MEASUREMENT_TYPES[trimmedName];
+  if (mt) {
+    await db.run(
+      `UPDATE exercises SET measurement_type = ? WHERE name = ?`,
+      [mt, trimmedName]
+    );
+  }
+
+  // Append at the end of this session's list. Ordering is by position
+  // (item 1 fix), so a newly-added exercise must take MAX(position)+1
+  // rather than the default 0 — otherwise it would jump to the top.
+  const posRes = await db.query(
+    `SELECT COALESCE(MAX(position), -1) + 1 AS nextPos
+     FROM session_exercises WHERE session_id = ?`,
+    [sessionId]
+  );
+  const position = Number(posRes.values?.[0]?.nextPos ?? 0);
+
   await db.run(
-    `INSERT INTO session_exercises (session_id, exercise_name, notes, created_at)
-     VALUES (?, ?, ?, ?)`,
-    [sessionId, trimmedName, notes ? String(notes).trim() : null, now]
+    `INSERT INTO session_exercises (session_id, exercise_name, notes, position, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [sessionId, trimmedName, notes ? String(notes).trim() : null, position, now]
   );
 }
 
@@ -880,7 +939,7 @@ export async function listSessionExercises(sessionId) {
     LEFT JOIN exercises e
       ON e.name = se.exercise_name
     WHERE se.session_id = ?
-    ORDER BY se.created_at DESC
+    ORDER BY se.position ASC, se.created_at ASC, se.id ASC
     `,
     [sessionId]
   );
@@ -905,21 +964,27 @@ export async function deleteSession(sessionId, log) {
 export async function preloadTemplateExercises(sessionId, focus, log) {
   await initDb();
 
-  const tpl = TEMPLATES[focus];
-  if (!tpl) {
-    if (typeof log === "function") {
-      log(`ℹ️ No template for focus="${focus}"`);
-    }
-    return;
-  }
-
-  // New shape: tpl.exercises = [{ name, ... }, ...]
-  // Legacy shape: tpl.anchors + tpl.suggested = [name, ...]
+  // Custom saved templates (item 7) come through as focus="custom:<id>".
   let names;
-  if (Array.isArray(tpl.exercises)) {
-    names = tpl.exercises.map(e => e.name);
+  if (typeof focus === "string" && focus.startsWith("custom:")) {
+    const templateId = Number(focus.slice("custom:".length));
+    const ex = await getCustomTemplateExercises(templateId);
+    names = ex.map(e => e.exercise_name);
   } else {
-    names = [...(tpl.anchors || []), ...(tpl.suggested || [])];
+    const tpl = TEMPLATES[focus];
+    if (!tpl) {
+      if (typeof log === "function") {
+        log(`ℹ️ No template for focus="${focus}"`);
+      }
+      return;
+    }
+    // New shape: tpl.exercises = [{ name, ... }, ...]
+    // Legacy shape: tpl.anchors + tpl.suggested = [name, ...]
+    if (Array.isArray(tpl.exercises)) {
+      names = tpl.exercises.map(e => e.name);
+    } else {
+      names = [...(tpl.anchors || []), ...(tpl.suggested || [])];
+    }
   }
 
   let position = 0;
@@ -935,4 +1000,249 @@ export async function preloadTemplateExercises(sessionId, focus, log) {
   if (typeof log === "function") {
     log(`✅ Preloaded ${names.length} template exercises for ${focus}`);
   }
+}
+
+/* --------------------------------------------------
+   Build 1 — declarative migrations & one-time cleanup
+   (all idempotent; safe to run on every boot)
+-------------------------------------------------- */
+
+/**
+ * Applies the declarative MEASUREMENT_TYPES map to the exercises table.
+ * Ensures each mapped name exists (INSERT OR IGNORE) then sets its
+ * measurement_type. Replaces the old ad-hoc, name-exact hardcoded
+ * corrections (e.g. the single "Bike" UPDATE) that missed real logged
+ * variants like "Bike warm-up". Runs every boot — cheap and idempotent.
+ */
+export async function applyMeasurementTypes(log) {
+  await initDb(log);
+  const now = Date.now();
+  const names = Object.keys(MEASUREMENT_TYPES);
+  for (const name of names) {
+    await db.run(
+      `INSERT OR IGNORE INTO exercises (name, created_at) VALUES (?, ?)`,
+      [name, now]
+    );
+    await db.run(
+      `UPDATE exercises SET measurement_type = ? WHERE name = ?`,
+      [MEASUREMENT_TYPES[name], name]
+    );
+  }
+  if (typeof log === "function") {
+    log(`✅ Applied measurement types (${names.length} mapped)`);
+  }
+}
+
+/**
+ * One-time rename: "Seated incline press machine" →
+ * "Seated high incline press machine" (item 5). Guarded by an app_state
+ * flag so it only runs once. Handles both the canonical exercises row
+ * (respecting the UNIQUE(name) constraint if the new name already exists)
+ * and every historical session_exercises reference, so old PBs follow.
+ */
+export async function renameSeatedInclineOnce(log) {
+  await initDb(log);
+  const FLAG = "rename_seated_high_incline_v1";
+  const done = await db.query(`SELECT value FROM app_state WHERE key = ?`, [FLAG]);
+  if (done.values?.[0]?.value === "1") return;
+
+  const OLD = "Seated incline press machine";
+  const NEW = "Seated high incline press machine";
+
+  // session_exercises references — surface old history under the new name.
+  await db.run(
+    `UPDATE session_exercises SET exercise_name = ? WHERE exercise_name = ?`,
+    [NEW, OLD]
+  );
+
+  // Canonical exercises row. If the new name already exists (from the seed
+  // CSV), just drop the old duplicate; otherwise rename in place.
+  const newExists = await db.query(`SELECT id FROM exercises WHERE name = ?`, [NEW]);
+  if (newExists.values?.[0]?.id) {
+    await db.run(`DELETE FROM exercises WHERE name = ?`, [OLD]);
+  } else {
+    await db.run(`UPDATE exercises SET name = ? WHERE name = ?`, [NEW, OLD]);
+  }
+
+  await db.run(
+    `INSERT OR REPLACE INTO app_state (key, value) VALUES (?, '1')`,
+    [FLAG]
+  );
+  if (typeof log === "function") log(`✅ Renamed "${OLD}" → "${NEW}"`);
+}
+
+/**
+ * Native-only JSON dump of the four core tables to
+ * Documents/GymLogBackups/pre_purge_<stamp>.json. Called before the
+ * irreversible orphan cleanup so the pre-migration state is recoverable.
+ * On web (no Filesystem) it's a no-op.
+ */
+export async function backupTablesJson(log) {
+  await initDb(log);
+  if (!Capacitor.isNativePlatform || !Capacitor.isNativePlatform()) {
+    if (typeof log === "function") log("ℹ️ backupTablesJson skipped (web)");
+    return null;
+  }
+  try {
+    const dump = {};
+    for (const t of ["sessions", "session_exercises", "sets", "exercises"]) {
+      const r = await db.query(`SELECT * FROM ${t}`);
+      dump[t] = r.values ?? [];
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const path = `GymLogBackups/pre_purge_${stamp}.json`;
+    await Filesystem.writeFile({
+      path,
+      data: JSON.stringify(dump, null, 2),
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8,
+      recursive: true,
+    });
+    if (typeof log === "function") log(`✅ Backup written: Documents/${path}`);
+    return path;
+  } catch (e) {
+    if (typeof log === "function") log("⚠️ backupTablesJson failed:", String(e));
+    return null;
+  }
+}
+
+/**
+ * One-time purge of orphaned session_exercises and sets — rows left behind
+ * by pre-FK-enforcement session deletes (root of the ghost-PB bug, item 2).
+ * Takes a JSON backup first, then deletes children with no live parent.
+ * Guarded by an app_state flag so it runs exactly once.
+ */
+export async function cleanupOrphansOnce(log) {
+  await initDb(log);
+  const FLAG = "cleanup_orphans_v1";
+  const done = await db.query(`SELECT value FROM app_state WHERE key = ?`, [FLAG]);
+  if (done.values?.[0]?.value === "1") return;
+
+  // Count first so we can log/skip the backup when there's nothing to do.
+  const seOrphans = await db.query(
+    `SELECT COUNT(*) AS c FROM session_exercises
+     WHERE session_id NOT IN (SELECT id FROM sessions)`
+  );
+  const setOrphans = await db.query(
+    `SELECT COUNT(*) AS c FROM sets
+     WHERE session_exercise_id NOT IN (SELECT id FROM session_exercises)`
+  );
+  const seCount = Number(seOrphans.values?.[0]?.c ?? 0);
+  const setCount = Number(setOrphans.values?.[0]?.c ?? 0);
+
+  if (seCount > 0 || setCount > 0) {
+    await backupTablesJson(log);
+    // Delete orphaned sets first (some point at the session_exercises we're
+    // about to delete; deleting sets last would re-orphan them).
+    await db.run(
+      `DELETE FROM sets
+       WHERE session_exercise_id NOT IN (SELECT id FROM session_exercises)`
+    );
+    await db.run(
+      `DELETE FROM session_exercises
+       WHERE session_id NOT IN (SELECT id FROM sessions)`
+    );
+    // The now-childless session_exercises we just removed may have left
+    // their own sets orphaned — sweep once more.
+    await db.run(
+      `DELETE FROM sets
+       WHERE session_exercise_id NOT IN (SELECT id FROM session_exercises)`
+    );
+    if (typeof log === "function") {
+      log(`✅ Purged orphans: ${seCount} session_exercises, ${setCount}+ sets`);
+    }
+  } else if (typeof log === "function") {
+    log("ℹ️ No orphaned rows to purge");
+  }
+
+  await db.run(
+    `INSERT OR REPLACE INTO app_state (key, value) VALUES (?, '1')`,
+    [FLAG]
+  );
+}
+
+/* --------------------------------------------------
+   Build 2 — custom session templates (item 7)
+-------------------------------------------------- */
+
+/**
+ * Creates a named custom template from an ordered list of exercise names.
+ * Each name is also ensured in the canonical exercises catalog so it picks
+ * up measurement_type / is_unilateral like any other exercise. Returns the
+ * new template id.
+ */
+export async function createCustomTemplate(name, exerciseNames = [], log) {
+  await initDb(log);
+  const now = Date.now();
+  const cleanName = String(name || "").trim() || "Custom session";
+
+  const res = await db.run(
+    `INSERT INTO custom_templates (name, created_at) VALUES (?, ?)`,
+    [cleanName, now]
+  );
+  let templateId = res?.changes?.lastId;
+  if (!templateId) {
+    const q = await db.query(`SELECT last_insert_rowid() AS id`);
+    templateId = q?.values?.[0]?.id;
+  }
+
+  let position = 0;
+  for (const raw of exerciseNames) {
+    const exName = String(raw || "").trim();
+    if (!exName) continue;
+    await db.run(
+      `INSERT OR IGNORE INTO exercises (name, created_at) VALUES (?, ?)`,
+      [exName, now]
+    );
+    await db.run(
+      `INSERT INTO custom_template_exercises (template_id, exercise_name, position)
+       VALUES (?, ?, ?)`,
+      [templateId, exName, position++]
+    );
+  }
+
+  if (typeof log === "function") {
+    log(`✅ Saved custom template "${cleanName}" (${position} exercises)`);
+  }
+  return templateId;
+}
+
+export async function listCustomTemplates() {
+  await initDb();
+  const res = await db.query(
+    `SELECT ct.id, ct.name, ct.created_at,
+            COUNT(cte.id) AS exercise_count
+     FROM custom_templates ct
+     LEFT JOIN custom_template_exercises cte ON cte.template_id = ct.id
+     GROUP BY ct.id
+     ORDER BY ct.created_at DESC`
+  );
+  return res.values ?? [];
+}
+
+export async function getCustomTemplate(templateId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT id, name, created_at FROM custom_templates WHERE id = ?`,
+    [templateId]
+  );
+  return res.values?.[0] ?? null;
+}
+
+export async function getCustomTemplateExercises(templateId) {
+  await initDb();
+  const res = await db.query(
+    `SELECT id, template_id, exercise_name, position
+     FROM custom_template_exercises
+     WHERE template_id = ?
+     ORDER BY position ASC, id ASC`,
+    [templateId]
+  );
+  return res.values ?? [];
+}
+
+export async function deleteCustomTemplate(templateId, log) {
+  await initDb(log);
+  await db.run(`DELETE FROM custom_templates WHERE id = ?`, [templateId]);
+  if (typeof log === "function") log(`✅ Deleted custom template id=${templateId}`);
 }
