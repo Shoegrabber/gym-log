@@ -92,10 +92,10 @@ export async function exportAllWeb({ log } = {}) {
   );
 
   // 2) exercises
-  const exercisesHeaders = ["id", "name", "created_at"];
+  const exercisesHeaders = ["id", "name", "measurement_type", "is_unilateral", "muscle_group", "created_at"];
   const exercises = await queryAll(
     conn,
-    `SELECT id, name, created_at
+    `SELECT id, name, measurement_type, is_unilateral, muscle_group, created_at
      FROM exercises
      ORDER BY name ASC, id ASC;`
   );
@@ -120,6 +120,7 @@ const setsHeaders = [
   "duration_sec",
   "distance_m",
   "assisted",
+  "side",
   "notes",
   "created_at"
 ];
@@ -136,6 +137,7 @@ const sets = await queryAll(
       duration_sec,
       distance_m,
       assisted,
+      side,
       notes,
       created_at
    FROM sets
@@ -185,9 +187,9 @@ export async function exportAllAndroid({ log } = {}) {
     ORDER BY created_at ASC, id ASC;
   `);
 
-  const exercisesHeaders = ["id", "name", "created_at"];
+  const exercisesHeaders = ["id", "name", "measurement_type", "is_unilateral", "muscle_group", "created_at"];
   const exercises = await queryAll(conn, `
-    SELECT id, name, created_at
+    SELECT id, name, measurement_type, is_unilateral, muscle_group, created_at
     FROM exercises
     ORDER BY name ASC, id ASC;
   `);
@@ -209,6 +211,7 @@ const setsHeaders = [
   "duration_sec",
   "distance_m",
   "assisted",
+  "side",
   "notes",
   "created_at"
 ];
@@ -224,6 +227,7 @@ const sets = await queryAll(conn, `
     duration_sec,
     distance_m,
     assisted,
+    side,
     notes,
     created_at
   FROM sets

@@ -27,9 +27,12 @@
              but the user has navigated to the idle view -->
         <div id="resume-banner" style="display:none;"></div>
 
+        <!-- Next up: one-tap start for the next day of the current split -->
+        <div id="next-up" class="section" style="display:none;"></div>
+
         <!-- Create session -->
         <div class="section">
-          <h2>Create session</h2>
+          <h2>Start a session</h2>
           <div class="row">
             <input id="session-date" type="date" />
             <select id="session-focus">
@@ -55,10 +58,7 @@
           </div>
           <div class="row" style="margin-top:10px;">
             <input id="session-notes" type="text" placeholder="notes (optional)" style="flex:1;" />
-            <button id="btn-create-session">Create</button>
-          </div>
-          <div class="row" style="margin-top:10px;">
-            <button id="btn-export-data">Export Data (CSV + JSON)</button>
+            <button id="btn-create-session">Start</button>
           </div>
         </div>
 
@@ -97,19 +97,46 @@
           </details>
         </div>
 
-        <!-- One-shot maintenance tool: merge old exercise names -->
+        <!-- Backup & settings -->
         <div class="section">
-          <details id="merge-names-tool">
-            <summary>🔧 Merge old exercise names</summary>
-            <div class="muted" style="margin-top:8px;">
-              Older log entries may not match the new canonical names
-              (e.g. "Bench press" vs "Smith machine bench press"). Map each
-              old name to its new equivalent so PB and history queries see it.
+          <details id="settings-tool">
+            <summary>⚙ Backup &amp; settings</summary>
+
+            <div id="backup-status" class="muted" style="margin-top:10px;"></div>
+            <div class="row" style="margin-top:10px;">
+              <button id="btn-backup-now" class="linkbtn">Back up now</button>
             </div>
-            <div style="margin-top:10px;">
-              <button id="btn-load-orphans" class="linkbtn">Scan for old names</button>
+            <div class="row" style="margin-top:8px;">
+              <button id="btn-export-data">Share an export (CSV + JSON)…</button>
             </div>
-            <div id="orphan-list" style="margin-top:10px;"></div>
+
+            <label class="field-row" style="margin-top:14px;">
+              <span>Default rest between sets (seconds)</span>
+              <input id="set-rest-default" type="number" inputmode="numeric" min="10" step="15" />
+            </label>
+            <div class="muted">Used when the plan or the exercise doesn't set its own rest.</div>
+
+            <details style="margin-top:14px;">
+              <summary>Also send backups to GitHub</summary>
+              <div class="muted" style="margin-top:8px;">
+                Each backup is saved as <code>backups/gym_log_latest.json</code> in the repo you name.
+                Use a private repo and a fine-grained token that can only write to that one repo.
+                The token stays on this phone and is never included in backups.
+              </div>
+              <label class="field-row"><span>Repo (owner/name)</span>
+                <input id="set-gh-repo" type="text" placeholder="owner/repo" autocomplete="off" autocapitalize="off" /></label>
+              <label class="field-row"><span>Access token</span>
+                <input id="set-gh-token" type="password" placeholder="paste token" autocomplete="off" /></label>
+              <div class="row" style="margin-top:10px;">
+                <button id="btn-gh-save" class="linkbtn">Save and test</button>
+                <button id="btn-gh-clear" class="danger tiny">Turn off</button>
+              </div>
+            </details>
+
+            <div style="margin-top:14px; border-top:1px solid var(--border-soft); padding-top:12px;">
+              <button id="btn-restore" class="danger">Restore from a backup file…</button>
+              <input id="restore-file-input" type="file" accept="application/json,.json" style="display:none;" />
+            </div>
           </details>
         </div>
 
@@ -160,12 +187,6 @@
             </div>
           </div>
 
-          <div class="row" style="margin-top:10px;">
-            <input id="exercise-notes" type="text" placeholder="exercise notes (optional)" style="flex:1;" />
-          </div>
-
-          <div class="muted" style="margin-top:10px;">Suggested:</div>
-          <div id="recent-exercise-pills" class="row" style="gap:8px; margin-top:6px;"></div>
         </div>
 
         <div style="margin-top:18px;">
@@ -202,11 +223,20 @@
          ============================================================ -->
     <section class="view" id="view-library" style="display:none;">
       <div id="library-list">
-        <!-- dynamically rendered exercise rows -->
+        <div class="section library-header">
+          <h2>Exercise Library</h2>
+          <input id="library-search" class="library-search" type="search" placeholder="Search exercises…"
+            autocomplete="off" />
+          <label class="switch-row" style="margin-top:10px;">
+            <span>Show exercises I haven't logged</span>
+            <input id="library-show-all" type="checkbox" />
+          </label>
+        </div>
+        <div id="library-rows"></div>
       </div>
 
       <div id="library-detail" style="display:none;">
-        <button id="btn-library-back" class="linkbtn tiny">◀ Back to library</button>
+        <button id="btn-library-back" class="linkbtn tiny">◀ Back</button>
         <div id="library-exercise-detail" style="margin-top:14px;"></div>
       </div>
     </section>
@@ -229,6 +259,7 @@
           <button id="btn-sw-start">Start</button>
           <button id="btn-sw-reset" class="linkbtn">Reset</button>
         </div>
+        <div id="stopwatch-save" style="margin-top:16px; text-align:center;"></div>
         <div class="muted" style="text-align:center; margin-top:12px;">
           Runs on wall-clock time — keeps counting if you switch apps.
         </div>

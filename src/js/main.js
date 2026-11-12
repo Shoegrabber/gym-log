@@ -29,15 +29,25 @@ import {
   shouldSuggestRaise,
   getLastSessionSetsForExercise,
   getTopSetsForExercise,
-  listOrphanExerciseNames,
-  mergeExerciseName,
-  getDashboardStats,
+  getSetting,
+  setSetting,
+  updateExerciseSettings,
   createCustomTemplate,
   listCustomTemplates,
   deleteCustomTemplate
 } from "./db.js";
-import { WEIGHT_INPUT_HINTS, SESSION_LABELS } from "./templates.js";
-import { LIBRARY_CONTENT } from "./library-content.js";
+import { TEMPLATES, WEIGHT_INPUT_HINTS, SESSION_LABELS } from "./templates.js";
+import { LocalNotifications } from "@capacitor/local-notifications";
+import {
+  configureStats,
+  renderDashboard as renderStatsDashboard,
+  renderExercisePage,
+  libraryIndex,
+  esc,
+  fmtDate,
+} from "./stats.js";
+import { runBackup, lastBackupText, restoreFromText } from "./backup.js";
+import { MEASUREMENT_LABELS } from "./muscles.js";
 import {
   exportCustomTemplate,
   exportSessionAsTemplate,
@@ -100,14 +110,88 @@ window.onunhandledrejection = (event) => {
    the app does not pause the countdown — when the
    user returns, the elapsed real time is reflected.
 -------------------------------------------------- */
-function startRestTimer(seconds = REST_TIMER_DEFAULT_SEC) {
+// Default rest when neither the exercise nor the plan sets one. Loaded
+// from Settings at boot.
+let restDefaultSec = REST_TIMER_DEFAULT_SEC;
+let restHideTimeout = null;
+const REST_NOTIFICATION_ID = 4101;
+let notifAllowed = null;
+let audioCtx = null;
+
+// Notifications are only used while the app is in the background (the
+// page's own timers stop there, so it can't buzz by itself).
+async function canNotify() {
+  if (!Capacitor.isNativePlatform()) return false;
+  if (notifAllowed === null) {
+    try {
+      let p = await LocalNotifications.checkPermissions();
+      if (p.display !== "granted") p = await LocalNotifications.requestPermissions();
+      notifAllowed = p.display === "granted";
+    } catch (_) {
+      notifAllowed = false;
+    }
+  }
+  return notifAllowed;
+}
+
+async function cancelRestNotification() {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    await LocalNotifications.cancel({ notifications: [{ id: REST_NOTIFICATION_ID }] });
+  } catch (_) { /* nothing scheduled */ }
+}
+
+async function scheduleRestNotification() {
+  if (timerEndAt == null || timerEndAt <= Date.now() + 1000) return;
+  if (!(await canNotify())) return;
+  try {
+    await LocalNotifications.schedule({
+      notifications: [{
+        id: REST_NOTIFICATION_ID,
+        title: "Rest over",
+        body: "Time for your next set.",
+        schedule: { at: new Date(timerEndAt), allowWhileIdle: true },
+      }],
+    });
+  } catch (e) {
+    logLine("⚠️ Could not schedule rest notification:", String(e));
+  }
+}
+
+function restDoneAlert() {
+  try { navigator.vibrate?.([250, 120, 250]); } catch (_) { /* unsupported */ }
+  try {
+    if (!audioCtx) return;
+    for (const at of [0, 0.3]) {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.frequency.value = 880;
+      g.gain.value = 0.15;
+      o.connect(g).connect(audioCtx.destination);
+      o.start(audioCtx.currentTime + at);
+      o.stop(audioCtx.currentTime + at + 0.2);
+    }
+  } catch (_) { /* no audio */ }
+}
+
+function startRestTimer(seconds) {
   const container = document.getElementById("rest-timer-container");
   if (!container) return;
+  const secs = Number(seconds) > 0 ? Number(seconds) : restDefaultSec;
+
+  // Called from a tap, so this is allowed to create/resume audio.
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (_) { /* no audio */ }
+  canNotify(); // ask once, early, rather than when the phone is locked
 
   if (timerTickInterval) clearInterval(timerTickInterval);
+  if (restHideTimeout) { clearTimeout(restHideTimeout); restHideTimeout = null; }
 
-  timerEndAt = Date.now() + seconds * 1000;
+  timerEndAt = Date.now() + secs * 1000;
   container.style.display = "block";
+  container.classList.remove("done");
 
   renderRestTimer();
   // 250ms tick: cheap, smooth, makes +15s feel snappy
@@ -121,8 +205,15 @@ function renderRestTimer() {
   const remainingMs = timerEndAt - Date.now();
 
   if (remainingMs <= 0) {
-    display.textContent = "00:00";
-    stopRestTimer();
+    // Finished: say so for a few seconds instead of silently vanishing.
+    const late = -remainingMs > 3000; // came back to the app after it ended
+    if (timerTickInterval) { clearInterval(timerTickInterval); timerTickInterval = null; }
+    timerEndAt = null;
+    cancelRestNotification();
+    display.textContent = "Go!";
+    document.getElementById("rest-timer-container")?.classList.add("done");
+    if (!late) restDoneAlert();
+    restHideTimeout = setTimeout(stopRestTimer, 6000);
     return;
   }
 
@@ -137,9 +228,14 @@ function stopRestTimer() {
     clearInterval(timerTickInterval);
     timerTickInterval = null;
   }
+  if (restHideTimeout) { clearTimeout(restHideTimeout); restHideTimeout = null; }
   timerEndAt = null;
+  cancelRestNotification();
   const container = document.getElementById("rest-timer-container");
-  if (container) container.style.display = "none";
+  if (container) {
+    container.style.display = "none";
+    container.classList.remove("done");
+  }
 }
 
 function addRestTime(seconds) {
@@ -148,10 +244,15 @@ function addRestTime(seconds) {
   renderRestTimer();
 }
 
-// Re-render immediately when the app returns to the foreground so the
-// displayed time reflects real elapsed time, not the last paused frame.
+// Foreground: the page counts down and buzzes itself. Background: hand
+// the alert to a scheduled notification, and take it back on return.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) renderRestTimer();
+  if (document.hidden) {
+    scheduleRestNotification();
+  } else {
+    cancelRestNotification();
+    renderRestTimer();
+  }
 });
 
 /* --------------------------------------------------
@@ -164,6 +265,10 @@ let swRunning = false;
 let swStartAt = null;   // Date.now() when current run began
 let swAccumMs = 0;      // elapsed ms banked from previous runs
 let swTickInterval = null;
+// The exercise this run is being timed for (set by "Time it" on an
+// exercise card). null = a plain stopwatch.
+let swTarget = null;
+const TIMED_TYPES = ["time_only", "weight_time", "cardio"];
 
 function swElapsedMs() {
   return swAccumMs + (swRunning && swStartAt != null ? Date.now() - swStartAt : 0);
@@ -198,6 +303,7 @@ function toggleStopwatch() {
     if (btn) btn.textContent = "Pause";
   }
   renderStopwatch();
+  renderStopwatchSave();
 }
 
 function resetStopwatch() {
@@ -208,6 +314,65 @@ function resetStopwatch() {
   const btn = document.getElementById("btn-sw-start");
   if (btn) btn.textContent = "Start";
   renderStopwatch();
+  renderStopwatchSave();
+}
+
+function fmtClock(sec) {
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}
+
+// Under the stopwatch: offer to save the time to a timed exercise in the
+// session being worked. With no session (or no time yet) it stays a
+// plain stopwatch.
+async function renderStopwatchSave() {
+  const el = document.getElementById("stopwatch-save");
+  if (!el) return;
+  const secs = Math.round(swElapsedMs() / 1000);
+  const targetNote = swTarget ? `<div class="sw-target">Timing <strong>${esc(swTarget.name)}</strong></div>` : "";
+
+  if (swRunning || secs < 1) {
+    el.innerHTML = targetNote + (swRunning && swTarget ? `<div class="muted">Pause to save it.</div>` : "");
+    return;
+  }
+
+  const activeId = await getActiveSessionId();
+  if (!activeId) {
+    el.innerHTML = `<div class="muted">Start a session to save this time to an exercise.</div>`;
+    return;
+  }
+  let timed = (await listSessionExercises(activeId)).filter((r) => TIMED_TYPES.includes(r.measurement_type));
+  if (swTarget) timed.sort((a, b) => (a.id === swTarget.seid ? -1 : b.id === swTarget.seid ? 1 : 0));
+  if (!timed.length) {
+    el.innerHTML = `<div class="muted">No timed exercises in this session. Add one (Bike, Plank…) and you can save times to it.</div>`;
+    return;
+  }
+  el.innerHTML = `${targetNote}<div class="muted" style="margin-bottom:8px;">Save ${fmtClock(secs)} to:</div>` +
+    timed.map((r, i) => `<button class="${i === 0 && swTarget ? "" : "linkbtn"} sw-save" data-sw-save="${r.id}" data-name="${esc(r.exercise_name)}" data-type="${r.measurement_type}">${esc(r.exercise_name)}</button>`).join("");
+
+  el.onclick = async (ev) => {
+    const b = ev.target.closest("[data-sw-save]");
+    if (!b) return;
+    const seid = Number(b.getAttribute("data-sw-save"));
+    const name = b.getAttribute("data-name");
+    let weight = null, unit = null;
+    if (b.getAttribute("data-type") === "weight_time") {
+      if (swTarget && swTarget.seid === seid && swTarget.weight != null) {
+        weight = swTarget.weight; unit = swTarget.unit;
+      } else {
+        const last = await getLatestSetForExercise(name);
+        if (last?.weight != null) { weight = last.weight; unit = last.weight_unit || "kg"; }
+      }
+    }
+    await insertSet({ sessionExerciseId: seid, duration_sec: secs, weight, weight_unit: unit });
+    logLine(`✅ Saved ${fmtClock(secs)} to ${name}`);
+    swTarget = null;
+    resetStopwatch();
+    lastActiveSessionExerciseId = seid;
+    selectedSessionId = activeId;
+    setSelectedSessionUI(await getSessionDetail(activeId));
+    await renderSelectedSessionExercises(activeId);
+    showView("session");
+  };
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -280,6 +445,7 @@ async function renderSessionIdle() {
       });
     }
   }
+  await renderNextUp();
   await refreshCustomSessions();
 }
 
@@ -376,15 +542,7 @@ async function populateExerciseDatalist() {
 async function startCustomSession(templateId) {
   try {
     const date = document.getElementById("session-date")?.value || todayISO();
-    const id = await createSession({ date, focus: `custom:${templateId}`, notes: "" });
-    selectedSessionId = id;
-    await preloadTemplateExercises(id, `custom:${templateId}`, logLine);
-    const detail = await getSessionDetail(id);
-    setSelectedSessionUI(detail);
-    await renderSelectedSessionExercises(selectedSessionId);
-    await updateLiveDot();
-    showView("session");
-    await refreshSessionsList();
+    await startSession(`custom:${templateId}`, { date });
   } catch (e) {
     logLine("❌ Start custom session failed:", String(e));
   }
@@ -407,92 +565,6 @@ function renderCustomBuilderChips() {
       renderCustomBuilderChips();
     })
   );
-}
-
-/* --------------------------------------------------
-   Dashboard tab (item 10) — dedicated stats screen
--------------------------------------------------- */
-async function renderDashboard() {
-  const el = document.getElementById("dashboard-content");
-  if (!el) return;
-
-  let stats;
-  try {
-    stats = await getDashboardStats();
-  } catch (e) {
-    logLine("⚠️ dashboard stats failed:", String(e));
-    el.innerHTML = `<div class="section"><div class="muted">No stats yet.</div></div>`;
-    return;
-  }
-
-  const { totalSessions, thisWeekVolume, lastWeekVolume, topPBs } = stats;
-
-  // Week-over-week delta arrow.
-  let delta = `<span class="dash-delta flat">–</span>`;
-  if (lastWeekVolume > 0) {
-    const pct = Math.round(((thisWeekVolume - lastWeekVolume) / lastWeekVolume) * 100);
-    if (pct > 0) delta = `<span class="dash-delta up">▲ ${pct}%</span>`;
-    else if (pct < 0) delta = `<span class="dash-delta down">▼ ${Math.abs(pct)}%</span>`;
-  } else if (thisWeekVolume > 0) {
-    delta = `<span class="dash-delta up">▲ new</span>`;
-  }
-
-  const pbsHtml = (topPBs || []).length
-    ? topPBs
-        .map(
-          (p) =>
-            `<div class="pb-row"><span>${p.name}</span><span class="badge pb-badge">${p.pb}kg</span></div>`
-        )
-        .join("")
-    : `<div class="muted">No PBs logged yet.</div>`;
-
-  // Recent sessions strip — a bit more detail than the old mini view.
-  const recent = await listSessions(6);
-  const recentHtml = recent.length
-    ? recent
-        .map((s) => {
-          const badge = s.status === "active" ? "active" : "finished";
-          return `<div class="pb-row">
-              <span>${focusLabel(s.focus)} <span class="muted">— ${s.date}</span></span>
-              <span class="badge ${badge}">${s.status}</span>
-            </div>`;
-        })
-        .join("")
-    : `<div class="muted">No sessions yet.</div>`;
-
-  el.innerHTML = `
-    <div class="section">
-      <h2>Dashboard</h2>
-      <div class="dash-grid">
-        <div class="stat">
-          <div class="stat-num">${totalSessions}</div>
-          <div class="stat-label">total sessions</div>
-        </div>
-        <div class="stat">
-          <div class="stat-num">${thisWeekVolume.toLocaleString()}<span class="stat-unit">kg</span></div>
-          <div class="stat-label">this week ${delta}</div>
-        </div>
-      </div>
-      <div class="dash-grid" style="margin-top:10px;">
-        <div class="stat">
-          <div class="stat-num">${lastWeekVolume.toLocaleString()}<span class="stat-unit">kg</span></div>
-          <div class="stat-label">last week</div>
-        </div>
-        <div class="stat">
-          <div class="stat-num">${(topPBs || []).length}</div>
-          <div class="stat-label">tracked lifts</div>
-        </div>
-      </div>
-    </div>
-    <div class="section">
-      <h2>Top PBs</h2>
-      <div class="dash-pbs">${pbsHtml}</div>
-    </div>
-    <div class="section">
-      <h2>Recent sessions</h2>
-      <div class="dash-pbs">${recentHtml}</div>
-    </div>
-  `;
 }
 
 /* --------------------------------------------------
@@ -521,119 +593,68 @@ function resolveVideoUrl(exerciseName) {
   return availableVideos.has(filename) ? `videos/${filename}` : null;
 }
 
-// Muscle groups for section headings (order sets render order)
-const LIBRARY_GROUPS = [
-  { label: "Chest",                     exercises: ["Smith machine incline press 15°", "Smith machine bench press", "Smith chest press machine", "Seated chest press machine", "Seated high incline press machine", "Cable chest fly", "Chest fly machine", "High incline press"] },
-  { label: "Back",                      exercises: ["Single-arm lat pulldown", "Single-arm cable row", "T-bar row", "Lean-forward seated cable row", "Face pull"] },
-  { label: "Shoulders",                 exercises: ["Lateral raises", "Lying lateral raise"] },
-  { label: "Arms — Triceps",            exercises: ["Tricep rope pushdown", "Overhead tricep extension", "Single-arm tricep pushdown"] },
-  { label: "Arms — Biceps",             exercises: ["Incline dumbbell curl", "Dumbbell preacher curl", "Hammer curl"] },
-  { label: "Lower — Quads",             exercises: ["Barbell back squat", "Leg press", "Bulgarian split squat", "Single leg press", "Leg extension", "Single-leg extension"] },
-  { label: "Lower — Hamstrings & Glutes", exercises: ["Seated leg curl", "Lying leg curl", "Dumbbell RDL", "Walking lunges"] },
-  { label: "Calves",                    exercises: ["Seated calf raise"] },
-  { label: "Adductors / Abductors",     exercises: ["Adductor machine", "Abductor machine"] },
-];
+// The library lists every exercise in the catalogue (everything ever
+// logged plus the seed list), grouped by muscle group. The header and
+// search box are static HTML; only the rows are re-rendered while typing,
+// so the keyboard never loses focus.
+let libraryGroups = null;
+let libraryReturnView = null; // where "Back" goes when opened from elsewhere
 
-function renderLibrary(filterQ = "") {
-  const listEl = document.getElementById("library-list");
-  if (!listEl) return;
+async function renderLibrary({ reload = true } = {}) {
+  const rowsEl = document.getElementById("library-rows");
+  if (!rowsEl) return;
+  if (reload || !libraryGroups) libraryGroups = await libraryIndex();
 
-  const q = filterQ.trim().toLowerCase();
+  const q = (document.getElementById("library-search")?.value ?? "").trim().toLowerCase();
+  const showUnlogged = !!document.getElementById("library-show-all")?.checked || !!q;
 
-  let html = `
-    <div class="section library-header">
-      <h2>Exercise Library</h2>
-      <input
-        id="library-search"
-        class="library-search"
-        type="search"
-        placeholder="Search exercises…"
-        value="${filterQ.replace(/"/g, "&quot;")}"
-        autocomplete="off"
-      />
-    </div>
-  `;
-
-  for (const group of LIBRARY_GROUPS) {
-    const rows = group.exercises
-      .filter(name => !q || name.toLowerCase().includes(q))
-      .map(name => {
-        const content = LIBRARY_CONTENT[name];
-        const tagline = content?.tagline ?? "";
-        const hasVideo = !!resolveVideoUrl(name);
+  let html = "";
+  let shown = 0;
+  for (const [group, list] of libraryGroups) {
+    const rows = list.filter((e) => (showUnlogged || e.sessions > 0) && (!q || e.name.toLowerCase().includes(q)));
+    if (!rows.length) continue;
+    shown += rows.length;
+    html += `<div class="library-group-label">${esc(group)}</div>`;
+    html += rows
+      .map((e) => {
+        const sub = e.sessions
+          ? `${e.sessions} session${e.sessions === 1 ? "" : "s"} · last ${fmtDate(e.last)}`
+          : "not logged yet";
         return `
-          <div class="library-row" data-library-exercise="${name.replace(/"/g, "&quot;")}">
+          <div class="library-row" data-library-exercise="${esc(e.name)}">
             <div>
-              <div class="library-row-name">${name}</div>
-              ${tagline ? `<div class="library-row-tagline">${tagline}</div>` : ""}
+              <div class="library-row-name">${esc(e.name)}${e.unilateral ? ` <span class="side-tag">L/R</span>` : ""}</div>
+              <div class="library-row-tagline">${sub}</div>
             </div>
-            ${hasVideo ? `<span class="video-badge">▶ video</span>` : ""}
-          </div>
-        `;
-      });
-
-    if (rows.length === 0) continue;
-
-    html += `<div class="library-group-label">${group.label}</div>`;
-    html += rows.join("");
+            ${resolveVideoUrl(e.name) ? `<span class="video-badge">▶ video</span>` : ""}
+          </div>`;
+      })
+      .join("");
   }
-
-  listEl.innerHTML = html;
-
-  // Search input wiring
-  const searchEl = document.getElementById("library-search");
-  searchEl?.addEventListener("input", () => renderLibrary(searchEl.value));
-
-  // Row tap → detail view
-  listEl.querySelectorAll("[data-library-exercise]").forEach(row => {
-    row.addEventListener("click", () => {
-      const name = row.getAttribute("data-library-exercise");
-      openLibraryExercise(name);
-    });
-  });
+  if (!shown) {
+    html = `<div class="muted" style="padding:14px 4px;">${q ? `Nothing matches "${esc(q)}".` : "Nothing logged yet — tick the box above to see every exercise."}</div>`;
+  }
+  rowsEl.innerHTML = html;
 }
 
-function openLibraryExercise(name) {
-  const listEl  = document.getElementById("library-list");
+function showLibraryList() {
+  document.getElementById("library-detail").style.display = "none";
+  document.getElementById("library-list").style.display = "block";
+}
+
+// Opens an exercise's page (chart, records, history, form notes,
+// settings). Used by the library list, the Stats tab and exercise cards.
+async function openLibraryExercise(name, { from = null } = {}) {
+  const listEl = document.getElementById("library-list");
   const detailEl = document.getElementById("library-detail");
   const contentEl = document.getElementById("library-exercise-detail");
   if (!listEl || !detailEl || !contentEl) return;
-
-  const content = LIBRARY_CONTENT[name];
-  const videoUrl = resolveVideoUrl(name);
-
-  const videoHtml = videoUrl
-    ? `<video class="exercise-video" src="${videoUrl}" controls playsinline loop preload="metadata"></video>`
-    : "";
-
-  const descHtml = content?.description
-    ? `<p class="exercise-desc">${content.description}</p>`
-    : "";
-
-  const tipsHtml = (content?.tips?.length)
-    ? `<div class="tips-label">Coaching tips</div>
-       <ul class="tips-list">
-         ${content.tips.map(t => `<li>${t}</li>`).join("")}
-       </ul>`
-    : "";
-
-  const noContent = !videoUrl && !content
-    ? `<div class="muted">No notes or video for this exercise yet.</div>`
-    : "";
-
-  contentEl.innerHTML = `
-    <div class="section">
-      <h2>${name}</h2>
-      ${content?.tagline ? `<div class="exercise-tagline">${content.tagline}</div>` : ""}
-      ${videoHtml}
-      ${descHtml}
-      ${tipsHtml}
-      ${noContent}
-    </div>
-  `;
-
+  libraryReturnView = from;
   listEl.style.display = "none";
   detailEl.style.display = "block";
+  showView("library");
+  await renderExercisePage(contentEl, name);
+  window.scrollTo(0, 0);
 }
 
 function setSelectedSessionUI(session) {
@@ -697,6 +718,7 @@ async function refreshSessionsList() {
     div.querySelector(`[data-open="${s.id}"]`).addEventListener("click", () => openHistorySession(s));
 
     div.querySelector(`[data-delete="${s.id}"]`).addEventListener("click", async () => {
+      if (!window.confirm(`Delete the ${focusLabel(s.focus)} session from ${s.date}? This removes all its sets and can't be undone.`)) return;
       await deleteSession(s.id, logLine);
       logLine(`🗑️ Deleted session id=${s.id}`);
       const activeId = await getActiveSessionId();
@@ -766,6 +788,14 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
 
   const rows = await listSessionExercises(sessionId);
 
+  // The plan for this session (built-in splits only): target sets, reps,
+  // rest and starting weight per exercise.
+  const sessionRow = await getSessionDetail(sessionId);
+  const planMap = new Map(
+    (TEMPLATES[sessionRow?.focus]?.exercises || []).map((e) => [e.name.toLowerCase(), e])
+  );
+  const restBySeid = new Map();
+
   if (!rows.length) {
     container.innerHTML = `<div class="muted">No exercises added yet.</div>`;
     return;
@@ -807,6 +837,10 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
   container.innerHTML = rowsDetailed
     .map(r => {
       const note = r.notes ? ` <span class="muted">— ${r.notes}</span>` : "";
+      const plan = planMap.get(String(r.exercise_name).toLowerCase());
+      // Rest: your own setting for the exercise, else the plan's, else default.
+      restBySeid.set(r.id, Number(r.rest_sec) || Number(plan?.rest_sec) || restDefaultSec);
+      const isBW = r.measurement_type === "bodyweight";
 
       const setsHtml = (r.sets || []).length
         ? `<div class="sets-container" style="margin-top: 8px;">
@@ -850,7 +884,9 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
                 label += ` — time, ${dist}`;
               }
             } else {
-              if (w !== "" && reps !== "") label += ` — ${w}${unit} × ${reps}`;
+              if (isBW && !(Number(w) > 0)) label += reps !== "" ? ` — ${reps} reps` : "";
+              else if (isBW) label += ` — +${w}${unit} × ${reps}`;
+              else if (w !== "" && reps !== "") label += ` — ${w}${unit} × ${reps}`;
               else if (w !== "") label += ` — ${w}${unit}`;
               else if (reps !== "") label += ` — ${reps} reps`;
             }
@@ -898,7 +934,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       <input
         data-duration-for="${r.id}"
         inputmode="numeric"
-        placeholder="seconds"
+        placeholder="sec"
         style="width: 120px;"
       />
       <button
@@ -907,6 +943,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
         class="tiny">
         + Set
       </button>
+      <button data-action="time-it" data-seid="${r.id}" data-name="${esc(r.exercise_name)}" class="linkbtn tiny">⏱ Time it</button>
     </div>
   `;
       } else if (r.measurement_type === "cardio") {
@@ -930,6 +967,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
         class="tiny">
         + Cardio
       </button>
+      <button data-action="time-it" data-seid="${r.id}" data-name="${esc(r.exercise_name)}" class="linkbtn tiny">⏱ Time it</button>
     </div>
   `;
       } else if (r.measurement_type === "weight_time") {
@@ -954,7 +992,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       <input
         data-duration-for="${r.id}"
         inputmode="numeric"
-        placeholder="seconds"
+        placeholder="sec"
         style="width: 90px;"
       />
       <button
@@ -963,12 +1001,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
         class="tiny">
         + Set
       </button>
-      <button
-        data-action="delete-exercise"
-        data-seid="${r.id}"
-        class="danger tiny">
-        ✖
-      </button>
+      <button data-action="time-it" data-seid="${r.id}" data-name="${esc(r.exercise_name)}" class="linkbtn tiny">⏱ Time it</button>
     </div>
   `;
       } else if (r.measurement_type === "notes_only") {
@@ -993,12 +1026,12 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
         // known, pre-fill ~60% of it (rounded to 2.5, in the unit normally
         // used for this lift) as a warm-up cue. Once any set is logged this
         // session, the normal last-set prefill resumes.
-        let prefillW = lastW;
+        let prefillW = isBW && !(Number(lastW) > 0) ? "" : lastW;
         let warmupHint = "";
         const isFirstSetThisSession = !(r.sets && r.sets.length);
         // Item 3: warm-up cue only for the first two exercises of the
         // session — later lifts are already warm.
-        const warmupEligible = r.orderIdx < 2;
+        const warmupEligible = r.orderIdx < 2 && !isBW;
         if (isFirstSetThisSession && warmupEligible && r.pb) {
           const warmKg = r.pb * 0.6;
           const warmDisplay = lastUnit === "lbs"
@@ -1025,40 +1058,21 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
     ${weightHint}
     ${warmupHint}
     <div class="row" style="margin-top: 10px;">
-      <input
-        data-weight-for="${r.id}"
-        inputmode="decimal"
-        placeholder="weight"
-        value="${prefillW}"
-        style="width: 60px;"
-      />
+      ${isBW ? `
+      <input data-reps-for="${r.id}" inputmode="numeric" placeholder="reps" value="${lastR}" style="width: 60px;" />
+      <input data-weight-for="${r.id}" inputmode="decimal" placeholder="+kg" value="${prefillW}" style="width: 60px;" />
+      <select data-weight-unit-for="${r.id}" style="display:none;"><option value="kg" selected>kg</option></select>
+      ` : `
+      <input data-weight-for="${r.id}" inputmode="decimal" placeholder="weight" value="${prefillW}" style="width: 60px;" />
       <select data-weight-unit-for="${r.id}" style="width: 56px;">
         <option value="kg" ${lastUnit === "kg" ? "selected" : ""}>kg</option>
         <option value="lbs" ${lastUnit === "lbs" ? "selected" : ""}>lbs</option>
       </select>
-      <input
-        data-reps-for="${r.id}"
-        inputmode="numeric"
-        placeholder="reps"
-        value="${lastR}"
-        style="width: 60px;"
-      />
+      <input data-reps-for="${r.id}" inputmode="numeric" placeholder="reps" value="${lastR}" style="width: 60px;" />
+      `}
 
       ${setBtns}
 
-      <button
-        data-action="repeat-set"
-        data-seid="${r.id}"
-        class="linkbtn tiny">
-        ↻
-      </button>
-
-      <button
-        data-action="delete-exercise"
-        data-seid="${r.id}"
-        class="danger tiny">
-        ✖
-      </button>
     </div>
   `;
       }
@@ -1079,6 +1093,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
             const parts = r.lastSessionSets.map(s => {
               const unit = s.weight_unit === "lbs" ? "lbs" : "kg";
               const sideTag = s.side ? `${s.side} ` : "";
+              if (s.reps != null && !(Number(s.weight) > 0) && (isBW || s.weight != null)) return `${sideTag}${s.reps} reps`;
               if (s.weight != null && s.reps != null) return `${sideTag}${s.weight}${unit}×${s.reps}`;
               if (s.weight != null) return `${sideTag}${s.weight}${unit}`;
               if (s.reps != null) return `${sideTag}${s.reps} reps`;
@@ -1089,7 +1104,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
               }
               return "—";
             });
-            return parts.map((p, i) => `${i + 1}: ${p}`).join(", ");
+            return parts.join(" · ");
           })()
         : "no previous session logged";
 
@@ -1140,14 +1155,48 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
           </div>`
         : "";
 
+      // Plan + last session, always visible: what to aim for today.
+      const doneSets = Math.ceil((r.sets || []).reduce((t, s) => t + (s.side ? 0.5 : 1), 0));
+      const planBits = [];
+      if (plan) {
+        planBits.push(`<strong>${doneSets}/${plan.sets}</strong> sets`);
+        if (plan.reps) planBits.push(`${esc(String(plan.reps))} reps`);
+        if (plan.weight_kg && !r.lastSet) planBits.push(`start ~${plan.weight_kg}kg`);
+      }
+      const planLine = planBits.length ? `<div class="plan-line">🎯 ${planBits.join(" · ")}</div>` : "";
+      const lastLine = (r.lastSessionSets && r.lastSessionSets.length)
+        ? `<div class="last-line">Last time: ${lastSessionSetsHtml}</div>`
+        : "";
+
+      const typeOpts = Object.entries(MEASUREMENT_LABELS)
+        .map(([k, l]) => `<option value="${k}" ${k === (r.measurement_type || "weight_reps") ? "selected" : ""}>${l}</option>`)
+        .join("");
+      const optionsPanel = `
+        <div class="ex-options" data-ex-options="${r.id}" style="display:none;">
+          <label class="switch-row"><span>Log each side (L / R)</span>
+            <input type="checkbox" data-opt-uni data-name="${esc(r.exercise_name)}" ${r.is_unilateral ? "checked" : ""}/></label>
+          <label class="field-row"><span>What you record</span>
+            <select data-opt-type data-name="${esc(r.exercise_name)}">${typeOpts}</select></label>
+          <div class="row" style="margin-top:10px;">
+            <button class="linkbtn tiny" data-action="open-stats" data-name="${esc(r.exercise_name)}">📈 History &amp; stats</button>
+            <button class="danger tiny" data-action="delete-exercise" data-seid="${r.id}" data-sets="${(r.sets || []).length}">Remove from session</button>
+          </div>
+        </div>`;
+
       return `<div class="exercise-item">
         <div class="exercise-header">
           <div>
             <strong>${r.exercise_name}</strong>
             ${note}
           </div>
-          ${pbBadge}
+          <div class="exercise-header-actions">
+            ${pbBadge}
+            <button class="linkbtn tiny icon-btn" data-action="toggle-options" data-seid="${r.id}" aria-label="Exercise options">⋯</button>
+          </div>
         </div>
+        ${planLine}
+        ${lastLine}
+        ${optionsPanel}
         ${pbDetails}
         ${raiseHint}
         ${setsHtml}
@@ -1164,6 +1213,38 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
     if (!btn) return;
 
     const action = btn.getAttribute("data-action");
+
+    if (action === "toggle-options") {
+      const seid = btn.getAttribute("data-seid");
+      const panel = container.querySelector(`[data-ex-options="${seid}"]`);
+      if (panel) panel.style.display = panel.style.display === "none" ? "block" : "none";
+      return;
+    }
+
+    if (action === "open-stats") {
+      await openLibraryExercise(btn.getAttribute("data-name"), {
+        from: container.id === "history-exercises" ? "history" : "session",
+      });
+      return;
+    }
+
+    if (action === "time-it") {
+      // Start the stopwatch already linked to this exercise.
+      const seid = Number(btn.getAttribute("data-seid"));
+      const wEl = container.querySelector(`input[data-weight-for="${seid}"]`);
+      const uEl = container.querySelector(`select[data-weight-unit-for="${seid}"]`);
+      const wRaw = (wEl?.value ?? "").trim();
+      resetStopwatch();
+      swTarget = {
+        seid,
+        name: btn.getAttribute("data-name"),
+        weight: wRaw === "" || !Number.isFinite(Number(wRaw)) ? null : Number(wRaw),
+        unit: uEl?.value || "kg",
+      };
+      toggleStopwatch();
+      showView("timer");
+      return;
+    }
 
     if (action === "toggle-pb-details") {
       const seid = btn.getAttribute("data-seid");
@@ -1198,7 +1279,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       // re-asserts on next render anyway, so clearing would just flicker.
 
       lastActiveSessionExerciseId = sessionExerciseId;
-      startRestTimer();
+      startRestTimer(restBySeid.get(sessionExerciseId));
 
       await renderSelectedSessionExercises(sessionId, container);
       return;
@@ -1230,7 +1311,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       if (dEl) dEl.value = "";
 
       lastActiveSessionExerciseId = sessionExerciseId;
-      startRestTimer();
+      startRestTimer(restBySeid.get(sessionExerciseId));
 
       await renderSelectedSessionExercises(sessionId, container);
       return;
@@ -1260,7 +1341,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       if (distEl) distEl.value = "";
 
       lastActiveSessionExerciseId = sessionExerciseId;
-      startRestTimer();
+      startRestTimer(restBySeid.get(sessionExerciseId));
       await renderSelectedSessionExercises(sessionId, container);
       return;
     }
@@ -1301,7 +1382,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
       if (dEl) dEl.value = "";
 
       lastActiveSessionExerciseId = sessionExerciseId;
-      startRestTimer();
+      startRestTimer(restBySeid.get(sessionExerciseId));
       await renderSelectedSessionExercises(sessionId, container);
       return;
     }
@@ -1376,7 +1457,7 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
         logLine("✅ Repeated last set:", { weight: last.weight, reps: last.reps, side: last.side });
 
         lastActiveSessionExerciseId = sessionExerciseId;
-        startRestTimer();
+        startRestTimer(restBySeid.get(sessionExerciseId));
 
         await renderSelectedSessionExercises(sessionId, container);
       } catch (e) {
@@ -1388,7 +1469,8 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
     if (action === "delete-exercise") {
       try {
         const sessionExerciseId = Number(btn.getAttribute("data-seid"));
-        logLine("🟦 delete-exercise clicked:", { sessionExerciseId });
+        const n = Number(btn.getAttribute("data-sets") || 0);
+        if (n > 0 && !window.confirm(`Remove this exercise and its ${n} logged set${n === 1 ? "" : "s"} from the session?`)) return;
 
         await deleteSessionExercise(sessionExerciseId);
 
@@ -1401,6 +1483,74 @@ async function renderSelectedSessionExercises(sessionId, container = document.ge
     }
 
   };
+
+  // Per-exercise options (each side / what you record) changed in place.
+  container.onchange = async (ev) => {
+    const t = ev.target;
+    const name = t.getAttribute?.("data-name");
+    if (!name) return;
+    if (t.hasAttribute("data-opt-uni")) {
+      await updateExerciseSettings(name, { is_unilateral: t.checked ? 1 : 0 });
+    } else if (t.hasAttribute("data-opt-type")) {
+      await updateExerciseSettings(name, { measurement_type: t.value });
+    } else {
+      return;
+    }
+    libraryGroups = null;
+    await renderSelectedSessionExercises(sessionId, container);
+  };
+}
+
+/* --------------------------------------------------
+   Starting sessions + "next up" suggestion
+-------------------------------------------------- */
+async function startSession(focus, { date = todayISO(), notes = "" } = {}) {
+  const id = await createSession({ date, focus, notes });
+  selectedSessionId = id;
+  lastActiveSessionExerciseId = null;
+  await preloadTemplateExercises(id, focus, logLine);
+  setSelectedSessionUI(await getSessionDetail(id));
+  await renderSelectedSessionExercises(id);
+  await updateLiveDot();
+  showView("session");
+  window.scrollTo(0, 0);
+  await refreshSessionsList();
+  return id;
+}
+
+const SPLITS = [
+  ["fourday_back", "fourday_push", "fourday_lower", "fourday_pull"],
+  ["upper_a", "lower_a", "push", "pull", "lower_b"],
+];
+
+// One-tap start for the next day of whichever split was trained last.
+async function renderNextUp() {
+  const el = document.getElementById("next-up");
+  if (!el) return;
+  el.style.display = "none";
+  if (await getActiveSessionId()) return;
+  const recent = (await listSessions(30)).filter((s) => s.status === "finished");
+  const last = recent.find((s) => SPLITS.some((sp) => sp.includes(s.focus)));
+  if (!last) return;
+  const split = SPLITS.find((sp) => sp.includes(last.focus));
+  const next = split[(split.indexOf(last.focus) + 1) % split.length];
+  el.innerHTML = `
+    <h2>Next up</h2>
+    <button id="btn-next-up" class="big-start">▶ Start ${esc(focusLabel(next))}</button>
+    <div class="muted" style="margin-top:8px;">Last was ${esc(focusLabel(last.focus))} on ${esc(fmtDate(last.date))}. Pick something else below.</div>`;
+  el.style.display = "block";
+  document.getElementById("btn-next-up")?.addEventListener("click", async () => {
+    try {
+      await startSession(next);
+    } catch (e) {
+      logLine("❌ Start session failed:", String(e));
+    }
+  });
+}
+
+async function refreshBackupStatus() {
+  const el = document.getElementById("backup-status");
+  if (el) el.textContent = await lastBackupText();
 }
 
 async function initSqliteWeb(log) {
@@ -1471,18 +1621,7 @@ async function safeStart() {
 
         logLine("🟦 Create clicked:", { date, focus, notes });
 
-        const id = await createSession({ date, focus, notes });
-        selectedSessionId = id;
-
-        await preloadTemplateExercises(id, focus, logLine);
-
-        const detail = await getSessionDetail(id);
-
-        setSelectedSessionUI(detail);
-        await renderSelectedSessionExercises(selectedSessionId);
-        await updateLiveDot();
-        showView("session");
-        await refreshSessionsList();
+        await startSession(focus, { date, notes });
       } catch (e) {
         logLine("❌ Create session failed:", String(e));
         if (e?.stack) logLine(e.stack);
@@ -1578,6 +1717,8 @@ async function safeStart() {
         logLine("🟦 Finishing session...", activeId);
         await finishSession(activeId, logLine);
         stopRestTimer();
+        // Automatic backup — runs in the background, never blocks finishing.
+        runBackup({ log: logLine }).then(refreshBackupStatus);
 
         logLine("🟦 Resetting UI to idle...");
         selectedSessionId = null;
@@ -1624,9 +1765,10 @@ async function safeStart() {
         const name = btn.getAttribute("data-nav");
         // Refresh per-tab content on entry.
         if (name === "session") await renderSessionIdle();
-        if (name === "dashboard") await renderDashboard();
+        if (name === "dashboard") await renderStatsDashboard(document.getElementById("dashboard-content"));
         if (name === "history") await refreshSessionsList();
-        if (name === "library") renderLibrary();
+        if (name === "library") { libraryReturnView = null; showLibraryList(); await renderLibrary(); }
+        if (name === "timer") await renderStopwatchSave();
         showView(name);
       });
     });
@@ -1645,9 +1787,97 @@ async function safeStart() {
     });
 
     // Back from library exercise detail → return to library list.
-    document.getElementById("btn-library-back")?.addEventListener("click", () => {
-      document.getElementById("library-detail").style.display = "none";
-      document.getElementById("library-list").style.display = "block";
+    document.getElementById("btn-library-back")?.addEventListener("click", async () => {
+      if (libraryReturnView) {
+        const v = libraryReturnView;
+        libraryReturnView = null;
+        if (v === "dashboard") await renderStatsDashboard(document.getElementById("dashboard-content"));
+        showView(v);
+        return;
+      }
+      showLibraryList();
+      await renderLibrary();
+    });
+
+    // Library: search + filter are wired once; only the rows re-render.
+    document.getElementById("library-search")?.addEventListener("input", () => renderLibrary({ reload: false }));
+    document.getElementById("library-show-all")?.addEventListener("change", () => renderLibrary({ reload: false }));
+    document.getElementById("library-rows")?.addEventListener("click", (ev) => {
+      const row = ev.target.closest("[data-library-exercise]");
+      if (row) openLibraryExercise(row.getAttribute("data-library-exercise"));
+    });
+
+    configureStats({
+      focusLabel,
+      resolveVideoUrl,
+      openExercise: (name) => openLibraryExercise(name, {
+        from: document.getElementById("view-dashboard")?.style.display !== "none" ? "dashboard" : libraryReturnView,
+      }),
+      onExerciseChanged: async () => {
+        libraryGroups = null;
+        if (selectedSessionId) await renderSelectedSessionExercises(selectedSessionId);
+      },
+    });
+
+    // ---------------------------
+    // Backup & settings
+    // ---------------------------
+    restDefaultSec = Number(await getSetting("rest_default_sec", REST_TIMER_DEFAULT_SEC)) || REST_TIMER_DEFAULT_SEC;
+    const restInput = document.getElementById("set-rest-default");
+    if (restInput) {
+      restInput.value = restDefaultSec;
+      restInput.addEventListener("change", async () => {
+        const v = Math.max(10, Number(restInput.value) || REST_TIMER_DEFAULT_SEC);
+        restDefaultSec = v;
+        restInput.value = v;
+        await setSetting("rest_default_sec", v);
+      });
+    }
+    await refreshBackupStatus();
+    document.getElementById("btn-backup-now")?.addEventListener("click", async () => {
+      const st = document.getElementById("backup-status");
+      if (st) st.textContent = "Backing up…";
+      await runBackup({ log: logLine });
+      await refreshBackupStatus();
+    });
+    const ghRepo = document.getElementById("set-gh-repo");
+    const ghToken = document.getElementById("set-gh-token");
+    if (ghRepo) ghRepo.value = await getSetting("gh_repo", "");
+    if (ghToken && (await getSetting("gh_token", ""))) ghToken.placeholder = "saved — leave blank to keep";
+    document.getElementById("btn-gh-save")?.addEventListener("click", async () => {
+      await setSetting("gh_repo", (ghRepo?.value ?? "").trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, ""));
+      const tok = (ghToken?.value ?? "").trim();
+      if (tok) await setSetting("gh_token", tok);
+      if (ghToken) { ghToken.value = ""; ghToken.placeholder = "saved — leave blank to keep"; }
+      const st = document.getElementById("backup-status");
+      if (st) st.textContent = "Saved. Testing with a backup now…";
+      await runBackup({ log: logLine });
+      await refreshBackupStatus();
+    });
+    document.getElementById("btn-gh-clear")?.addEventListener("click", async () => {
+      await setSetting("gh_repo", "");
+      await setSetting("gh_token", "");
+      if (ghRepo) ghRepo.value = "";
+      if (ghToken) { ghToken.value = ""; ghToken.placeholder = "paste token"; }
+      await refreshBackupStatus();
+    });
+    const restoreInput = document.getElementById("restore-file-input");
+    document.getElementById("btn-restore")?.addEventListener("click", () => restoreInput?.click());
+    restoreInput?.addEventListener("change", async () => {
+      const file = restoreInput.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        if (!window.confirm("Replace EVERYTHING in the app with this backup? Sessions logged since that backup will be lost.")) return;
+        const res = await restoreFromText(text, { log: logLine });
+        window.alert(`Restored ${res.sessions} sessions and ${res.sets} sets. The app will reload.`);
+        window.location.reload();
+      } catch (e) {
+        logLine("❌ Restore failed:", String(e));
+        window.alert(`Restore failed: ${e.message || e}`);
+      } finally {
+        restoreInput.value = "";
+      }
     });
 
     // Load custom-template name cache before rendering any session header
@@ -1684,188 +1914,68 @@ async function safeStart() {
 
     logLine("✅ Ready.");
     // -----------------------------
-    // Unified Exercise Search
+    // Add exercise to the session: type to search, tap a result to add
+    // it straight away. "Add" adds whatever is typed (a new exercise).
     // -----------------------------
-    try {
-      const exerciseInput = document.getElementById("exercise-name");
-      const listDiv = document.getElementById("exercise-picker-list");
+    const exerciseInput = document.getElementById("exercise-name");
+    const listDiv = document.getElementById("exercise-picker-list");
 
-      if (!exerciseInput || !listDiv) {
-        logLine("⚠️ Unified exercise elements not found");
-      } else {
-        const renderResults = async (qRaw = "") => {
-          const q = String(qRaw).trim().toLowerCase();
-          if (!q) {
-            listDiv.style.display = "none";
-            return;
-          }
-
-          // Fresh query each time so newly-added exercises appear without reload.
-          const allExercises = await listExercises(1000);
-          const filtered = allExercises.filter(e => e.name.toLowerCase().includes(q));
-          if (filtered.length === 0) {
-            listDiv.style.display = "none";
-            return;
-          }
-
-          listDiv.style.display = "block";
-          listDiv.innerHTML = filtered.slice(0, 10)
-            .map(e => `
-              <button type="button"
-                data-name="${e.name.replace(/"/g, "&quot;")}"
-                class="search-item">
-                ${e.name}
-              </button>
-            `)
-            .join("");
-
-          listDiv.querySelectorAll("button[data-name]").forEach(btn => {
-            btn.addEventListener("click", async () => {
-              const name = btn.getAttribute("data-name");
-              exerciseInput.value = name;
-              listDiv.style.display = "none";
-
-              // Suggest previous weight/reps
-              const lastSet = await getLatestSetForExercise(name);
-              if (lastSet) {
-                const pillsContainer = document.getElementById("recent-exercise-pills");
-                if (pillsContainer) {
-                  let label = "";
-                  if (lastSet.weight) label += `${lastSet.weight}kg `;
-                  if (lastSet.reps) label += `x ${lastSet.reps}`;
-                  if (lastSet.duration_sec) label += `(${Math.floor(lastSet.duration_sec / 60)}:${String(lastSet.duration_sec % 60).padStart(2, '0')})`;
-
-                  pillsContainer.innerHTML = `<button class="pill tiny" data-set='${JSON.stringify(lastSet)}'>Use last: ${label}</button>`;
-                  pillsContainer.querySelector("button")?.addEventListener("click", () => {
-                    // This pill logic will be handled below
-                  });
-                }
-              }
-            });
-          });
-        };
-
-        exerciseInput.addEventListener("input", () => renderResults(exerciseInput.value));
-
-        // Hide list when clicking outside
-        document.addEventListener("click", (e) => {
-          if (!exerciseInput.contains(e.target) && !listDiv.contains(e.target)) {
-            listDiv.style.display = "none";
-          }
-        });
-
-        // Handle suggested pill clicks
-        document.getElementById("recent-exercise-pills")?.addEventListener("click", (e) => {
-          const btn = e.target.closest("button[data-set]");
-          if (btn) {
-            const lastSet = JSON.parse(btn.getAttribute("data-set"));
-            logLine("🟦 Applied suggestion:", lastSet);
-            // We could auto-fill inputs here if we had specific ones, but session-exercise doesn't have them yet.
-            // Actually, we usually want these when adding SETS.
-          }
-        });
-      }
-    } catch (e) {
-      logLine("⚠️ Unified search failed:", String(e));
-    }
-
-    // ---------------------------
-    // Add exercise to session (Phase B-5)
-    // ---------------------------
-    const addBtn = document.getElementById("btn-add-exercise");
-    const exerciseNameInput = document.getElementById("exercise-name");
-    const exerciseNotesInput = document.getElementById("exercise-notes");
-
-    addBtn?.addEventListener("click", async () => {
+    const addExerciseByName = async (rawName) => {
+      const name = String(rawName || "").trim();
+      if (!name) return;
       if (!selectedSessionId) {
         logLine("⚠️ No active session");
         return;
       }
-
-      const name = exerciseNameInput.value.trim();
-      if (!name) return;
-
-      await addExerciseToSession(
-        selectedSessionId,
-        name,
-        exerciseNotesInput?.value || null
-      );
-
+      await addExerciseToSession(selectedSessionId, name, null);
+      libraryGroups = null;
+      if (exerciseInput) exerciseInput.value = "";
+      if (listDiv) listDiv.style.display = "none";
       await renderSelectedSessionExercises(selectedSessionId);
-
-      exerciseNameInput.value = "";
-      if (exerciseNotesInput) exerciseNotesInput.value = "";
-
-      await window.renderSessionExercises?.();
       logLine("🟦 Exercise added:", name);
-    });
+    };
 
-    // ---------------------------
-    // Merge old exercise names (one-shot tool)
-    // Old logs under deprecated template names are invisible to the new
-    // PB queries because the name doesn't match. This UI surfaces those
-    // orphans and lets the user remap each to a current canonical name.
-    // ---------------------------
-    const loadOrphansBtn = document.getElementById("btn-load-orphans");
-    const orphanListEl = document.getElementById("orphan-list");
-
-    loadOrphansBtn?.addEventListener("click", async () => {
-      try {
-        const orphans = await listOrphanExerciseNames();
-        const canonical = await listExercises(1000);
-
-        if (!orphans.length) {
-          orphanListEl.innerHTML = `<div class="muted">No orphan exercise names found. Your history is clean.</div>`;
+    if (exerciseInput && listDiv) {
+      let catalogue = null; // loaded once per focus so typing stays instant
+      exerciseInput.addEventListener("focus", async () => {
+        catalogue = await listExercises(2000);
+      });
+      exerciseInput.addEventListener("input", async () => {
+        const q = exerciseInput.value.trim().toLowerCase();
+        if (!q) {
+          listDiv.style.display = "none";
           return;
         }
-
-        const options = ['<option value="">— pick canonical name —</option>']
-          .concat(canonical.map(e => `<option value="${e.name.replace(/"/g, "&quot;")}">${e.name}</option>`))
+        if (!catalogue) catalogue = await listExercises(2000);
+        const starts = catalogue.filter((e) => e.name.toLowerCase().startsWith(q));
+        const contains = catalogue.filter((e) => !e.name.toLowerCase().startsWith(q) && e.name.toLowerCase().includes(q));
+        const hits = [...starts, ...contains].slice(0, 10);
+        if (!hits.length) {
+          listDiv.style.display = "none";
+          return;
+        }
+        listDiv.innerHTML = hits
+          .map((e) => `<button type="button" data-name="${esc(e.name)}" class="search-item">${esc(e.name)}</button>`)
           .join("");
-
-        const rows = orphans.map((o, idx) => `
-          <div class="card" style="margin-top:8px;">
-            <div><strong>${o.name}</strong> <span class="muted">(${o.set_count} sets)</span></div>
-            <div class="row" style="margin-top:6px;">
-              <select data-orphan-map="${idx}" style="flex:1;">${options}</select>
-            </div>
-            <input type="hidden" data-orphan-name="${idx}" value="${o.name.replace(/"/g, "&quot;")}" />
-          </div>
-        `).join("");
-
-        orphanListEl.innerHTML = `
-          ${rows}
-          <div class="row" style="margin-top:12px;">
-            <button id="btn-apply-merge">Apply merges</button>
-          </div>
-        `;
-
-        document.getElementById("btn-apply-merge")?.addEventListener("click", async () => {
-          const selects = orphanListEl.querySelectorAll("select[data-orphan-map]");
-          let merged = 0;
-          let updatedRows = 0;
-          for (const sel of selects) {
-            const idx = sel.getAttribute("data-orphan-map");
-            const oldName = orphanListEl.querySelector(`input[data-orphan-name="${idx}"]`)?.value;
-            const newName = sel.value;
-            if (!oldName || !newName) continue;
-            const n = await mergeExerciseName(oldName, newName);
-            if (n > 0) {
-              merged += 1;
-              updatedRows += n;
-            }
-          }
-          if (merged === 0) {
-            orphanListEl.innerHTML = `<div class="muted">Nothing to merge — no canonical names were picked.</div>`;
-          } else {
-            orphanListEl.innerHTML = `<div class="muted">✅ Merged ${merged} name(s), updated ${updatedRows} session_exercises row(s). Your old PBs should now surface under the new names.</div>`;
-          }
-          logLine(`✅ Merge: ${merged} names, ${updatedRows} rows`);
-        });
-      } catch (e) {
-        logLine("❌ load orphans failed:", String(e));
-      }
-    });
+        listDiv.style.display = "block";
+      });
+      listDiv.addEventListener("click", (ev) => {
+        const b = ev.target.closest("button[data-name]");
+        if (b) addExerciseByName(b.getAttribute("data-name"));
+      });
+      exerciseInput.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          addExerciseByName(exerciseInput.value);
+        }
+      });
+      document.addEventListener("click", (ev) => {
+        if (!exerciseInput.contains(ev.target) && !listDiv.contains(ev.target)) {
+          listDiv.style.display = "none";
+        }
+      });
+    }
+    document.getElementById("btn-add-exercise")?.addEventListener("click", () => addExerciseByName(exerciseInput?.value));
   } catch (e) {
     logLine("❌ safeStart crashed:", String(e));
     if (e?.stack) logLine(e.stack);
@@ -1873,3 +1983,7 @@ async function safeStart() {
 }
 
 safeStart();
+
+// Dev-only hook (stripped from production builds) for loading test data
+// in the browser preview.
+if (import.meta.env?.DEV) window.__gymDev = { restoreFromText, runBackup };

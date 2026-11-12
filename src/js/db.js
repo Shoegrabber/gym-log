@@ -1,7 +1,8 @@
 import { CapacitorSQLite, SQLiteConnection } from "@capacitor-community/sqlite";
 import { Capacitor } from "@capacitor/core";
 import { Filesystem, Directory, Encoding } from "@capacitor/filesystem";
-import { TEMPLATES, UNILATERAL_EXERCISES, MEASUREMENT_TYPES } from "./templates.js";
+import { TEMPLATES } from "./templates.js";
+import { inferMuscleGroup, inferUnilateral, inferMeasurementType } from "./muscles.js";
 
 const DB_NAME = "gym_log";
 const DB_VERSION = 1;
@@ -268,12 +269,42 @@ export async function initDb(log) {
       );
     `);
 
+    // -----------------------------
+    // Revamp 2026-11 — per-exercise settings the user can change in-app.
+    // user_edited=1 stops the name-based defaults overwriting a choice.
+    // -----------------------------
+    await addColumn("exercises", "user_edited INTEGER NOT NULL DEFAULT 0", log);
+    await addColumn("exercises", "muscle_group TEXT NULL", log);
+    await addColumn("exercises", "rest_sec INTEGER NULL", log);
+
+    // Generic per-day health log, reserved for future modules (body
+    // weight, sleep, food…). kind is a free string such as "body_weight"
+    // or "sleep_hours"; nothing reads it yet, but it is created now so
+    // backups and restores carry it from day one.
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS daily_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        value REAL NULL,
+        unit TEXT NULL,
+        notes TEXT NULL,
+        source TEXT NULL,
+        created_at INTEGER NOT NULL
+      );
+    `);
+    await db.execute(`
+      CREATE INDEX IF NOT EXISTS idx_daily_metrics_kind_date
+      ON daily_metrics(kind, date);
+    `);
+
     // Build 1 — idempotent migrations & one-time cleanup. Order matters:
     // rename before measurement types (so the renamed row gets its type),
     // and orphan purge last (it backs up the post-rename state).
     await renameSeatedInclineOnce(log);
-    await applyMeasurementTypes(log);
     await cleanupOrphansOnce(log);
+    await coverHistoryNames();
+    await applyExerciseDefaults(log);
 
     if (typeof log === "function") log("✅ initDb OK");
     return db;
@@ -335,7 +366,7 @@ export async function seedExercisesFromCsv(log) {
 
   if (await hasSeededExercises()) {
     if (typeof log === "function") log("ℹ️ exercises seed already applied");
-    await markUnilateralExercises(log);
+    await applyExerciseDefaults(log);
     return;
   }
 
@@ -367,7 +398,7 @@ export async function seedExercisesFromCsv(log) {
     }
 
     await setSeededExercises();
-    await markUnilateralExercises(log);
+    await applyExerciseDefaults(log);
 
     if (typeof log === "function") {
       log(`✅ Seeded exercises from CSV (${rows.length} rows)`);
@@ -380,16 +411,123 @@ export async function seedExercisesFromCsv(log) {
   }
 }
 
-async function markUnilateralExercises(log) {
-  for (const name of UNILATERAL_EXERCISES) {
+// Idempotent add-column helper (SQLite has no ADD COLUMN IF NOT EXISTS).
+async function addColumn(table, colDef, log) {
+  try {
+    await db.execute(`ALTER TABLE ${table} ADD COLUMN ${colDef}`);
+    if (typeof log === "function") log(`✅ Migration OK: ${table}.${colDef.split(" ")[0]}`);
+  } catch (e) {
+    const msg = String(e || "").toLowerCase();
+    if (!msg.includes("duplicate") && !msg.includes("already exists")) {
+      if (typeof log === "function") log(`⚠️ Migration warning (${table}):`, msg);
+    }
+  }
+}
+
+// Give every exercise name that appears in history a catalogue row, so
+// it shows in the library and can carry settings.
+async function coverHistoryNames() {
+  const missing = await db.query(
+    `SELECT DISTINCT se.exercise_name AS name FROM session_exercises se
+     LEFT JOIN exercises e ON e.name = se.exercise_name COLLATE NOCASE
+     WHERE e.id IS NULL AND TRIM(se.exercise_name) != ''`
+  );
+  for (const m of missing.values ?? []) {
     await db.run(
-      `UPDATE exercises SET is_unilateral = 1 WHERE name = ?`,
-      [name]
+      `INSERT OR IGNORE INTO exercises (name, created_at) VALUES (?, ?)`,
+      [String(m.name).trim(), Date.now()]
     );
   }
-  if (typeof log === "function") {
-    log(`✅ Marked ${UNILATERAL_EXERCISES.length} unilateral exercises`);
+}
+
+/**
+ * Applies name-based defaults (each-side, measurement type, muscle group)
+ * to every catalogue exercise the user has NOT edited. Runs each boot and
+ * only writes rows that actually differ, so it is cheap after the first run.
+ */
+export async function applyExerciseDefaults(log) {
+  const res = await db.query(
+    `SELECT id, name, measurement_type, is_unilateral, muscle_group, user_edited FROM exercises`
+  );
+  let changed = 0;
+  for (const e of res.values ?? []) {
+    const group = e.muscle_group || inferMuscleGroup(e.name);
+    let uni = Number(e.is_unilateral) ? 1 : 0;
+    let mt = e.measurement_type || "weight_reps";
+    if (!Number(e.user_edited)) {
+      if (inferUnilateral(e.name)) uni = 1;
+      const inferred = inferMeasurementType(e.name);
+      if (inferred) mt = inferred;
+    }
+    if (group !== e.muscle_group || uni !== (Number(e.is_unilateral) ? 1 : 0) || mt !== e.measurement_type) {
+      await db.run(
+        `UPDATE exercises SET muscle_group = ?, is_unilateral = ?, measurement_type = ? WHERE id = ?`,
+        [group, uni, mt, e.id]
+      );
+      changed++;
+    }
   }
+  if (typeof log === "function") log(`✅ Exercise defaults applied (${changed} updated)`);
+}
+
+/**
+ * Makes sure an exercise exists in the catalogue and returns its canonical
+ * name. Matching ignores case, so "dumbbell hammer curl" reuses the existing
+ * "Dumbbell hammer curl" row instead of creating a twin with no settings.
+ * New rows get their name-based defaults straight away (not at next boot).
+ */
+export async function ensureExercise(rawName) {
+  await initDb();
+  const name = String(rawName || "").trim();
+  if (!name) return name;
+  const found = await db.query(
+    `SELECT name FROM exercises WHERE name = ? COLLATE NOCASE LIMIT 1`,
+    [name]
+  );
+  if (found.values?.[0]?.name) return found.values[0].name;
+  await db.run(
+    `INSERT OR IGNORE INTO exercises
+       (name, measurement_type, is_unilateral, muscle_group, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      name,
+      inferMeasurementType(name) || "weight_reps",
+      inferUnilateral(name) ? 1 : 0,
+      inferMuscleGroup(name),
+      Date.now(),
+    ]
+  );
+  return name;
+}
+
+export async function getExercise(name) {
+  await initDb();
+  const res = await db.query(
+    `SELECT * FROM exercises WHERE name = ? COLLATE NOCASE LIMIT 1`,
+    [name]
+  );
+  return res.values?.[0] ?? null;
+}
+
+/** User-chosen settings for one exercise. Marks the row user_edited. */
+export async function updateExerciseSettings(name, fields) {
+  await initDb();
+  const canonical = await ensureExercise(name);
+  const allowed = ["is_unilateral", "measurement_type", "muscle_group", "rest_sec"];
+  const cols = [];
+  const vals = [];
+  for (const k of allowed) {
+    if (Object.prototype.hasOwnProperty.call(fields, k)) {
+      cols.push(`${k} = ?`);
+      vals.push(fields[k] === "" || fields[k] === undefined ? null : fields[k]);
+    }
+  }
+  if (!cols.length) return;
+  vals.push(canonical);
+  await db.run(
+    `UPDATE exercises SET ${cols.join(", ")}, user_edited = 1 WHERE name = ?`,
+    vals
+  );
 }
 
 export async function listExercises(limit = 500) {
@@ -498,7 +636,7 @@ export async function getLatestSetForExercise(exerciseName) {
     `SELECT s.*
      FROM sets s
      JOIN session_exercises se ON s.session_exercise_id = se.id
-     WHERE se.exercise_name = ?
+     WHERE se.exercise_name = ? COLLATE NOCASE
      ORDER BY s.created_at DESC
      LIMIT 1`,
     [exerciseName]
@@ -520,7 +658,7 @@ export async function getPersonalBest(exerciseName) {
      FROM sets s
      JOIN session_exercises se ON s.session_exercise_id = se.id
      JOIN sessions sess ON se.session_id = sess.id
-     WHERE se.exercise_name = ?
+     WHERE se.exercise_name = ? COLLATE NOCASE
        AND s.weight IS NOT NULL`,
     [exerciseName]
   );
@@ -546,7 +684,7 @@ export async function getTopSetsForExercise(exerciseName, currentSessionId, limi
      FROM sets s
      JOIN session_exercises se ON s.session_exercise_id = se.id
      JOIN sessions sess ON se.session_id = sess.id
-     WHERE se.exercise_name = ?
+     WHERE se.exercise_name = ? COLLATE NOCASE
        AND s.weight IS NOT NULL
        AND se.session_id != ?
      ORDER BY norm_kg DESC, s.created_at DESC
@@ -566,7 +704,7 @@ export async function getLastSessionSetsForExercise(exerciseName, currentSession
   await initDb();
   const seRes = await db.query(
     `SELECT id FROM session_exercises
-     WHERE exercise_name = ? AND session_id != ?
+     WHERE exercise_name = ? COLLATE NOCASE AND session_id != ?
      ORDER BY created_at DESC
      LIMIT 1`,
     [exerciseName, currentSessionId ?? -1]
@@ -595,7 +733,7 @@ export async function listOrphanExerciseNames() {
     `SELECT DISTINCT se.exercise_name AS name,
             COUNT(s.id) AS set_count
      FROM session_exercises se
-     LEFT JOIN exercises e ON e.name = se.exercise_name
+     LEFT JOIN exercises e ON e.name = se.exercise_name COLLATE NOCASE
      LEFT JOIN sets s ON s.session_exercise_id = se.id
      WHERE e.id IS NULL
      GROUP BY se.exercise_name
@@ -617,11 +755,15 @@ export async function mergeExerciseName(oldName, newName) {
     [oldName]
   );
   const count = Number(before.values?.[0]?.c ?? 0);
-  if (!count) return 0;
   await db.run(
     `UPDATE session_exercises SET exercise_name = ? WHERE exercise_name = ?`,
     [newName, oldName]
   );
+  await db.run(
+    `UPDATE custom_template_exercises SET exercise_name = ? WHERE exercise_name = ?`,
+    [newName, oldName]
+  );
+  await db.run(`DELETE FROM exercises WHERE name = ?`, [oldName]);
   return count;
 }
 
@@ -848,7 +990,7 @@ export async function shouldSuggestRaise(exerciseName, currentSessionId) {
   await initDb();
   const seRes = await db.query(
     `SELECT id FROM session_exercises
-     WHERE exercise_name = ? AND session_id != ?
+     WHERE exercise_name = ? COLLATE NOCASE AND session_id != ?
      ORDER BY created_at DESC
      LIMIT 1`,
     [exerciseName, currentSessionId]
@@ -891,24 +1033,9 @@ export async function addExerciseToSession(sessionId, exerciseName, notes = null
   const now = Date.now();
   const trimmedName = String(exerciseName).trim();
 
-  // Persist to catalog so freshly-typed exercises show up in future
-  // searches (no-op if already present).
-  await db.run(
-    `INSERT OR IGNORE INTO exercises (name, created_at)
-     VALUES (?, ?)`,
-    [trimmedName, now]
-  );
-
-  // Apply the declarative measurement type (if this name is mapped) so a
-  // just-added time/cardio/hold exercise prompts for the right inputs
-  // immediately — not just after a full re-seed.
-  const mt = MEASUREMENT_TYPES[trimmedName];
-  if (mt) {
-    await db.run(
-      `UPDATE exercises SET measurement_type = ? WHERE name = ?`,
-      [mt, trimmedName]
-    );
-  }
+  // Persist to the catalogue (with its defaults) and reuse the existing
+  // spelling if this exercise is already known under different casing.
+  const canonicalName = await ensureExercise(trimmedName);
 
   // Append at the end of this session's list. Ordering is by position
   // (item 1 fix), so a newly-added exercise must take MAX(position)+1
@@ -923,7 +1050,7 @@ export async function addExerciseToSession(sessionId, exerciseName, notes = null
   await db.run(
     `INSERT INTO session_exercises (session_id, exercise_name, notes, position, created_at)
      VALUES (?, ?, ?, ?, ?)`,
-    [sessionId, trimmedName, notes ? String(notes).trim() : null, position, now]
+    [sessionId, canonicalName, notes ? String(notes).trim() : null, position, now]
   );
 }
 
@@ -934,10 +1061,12 @@ export async function listSessionExercises(sessionId) {
     SELECT
       se.*,
       e.measurement_type,
-      e.is_unilateral
+      e.is_unilateral,
+      e.muscle_group,
+      e.rest_sec
     FROM session_exercises se
     LEFT JOIN exercises e
-      ON e.name = se.exercise_name
+      ON e.name = se.exercise_name COLLATE NOCASE
     WHERE se.session_id = ?
     ORDER BY se.position ASC, se.created_at ASC, se.id ASC
     `,
@@ -988,7 +1117,8 @@ export async function preloadTemplateExercises(sessionId, focus, log) {
   }
 
   let position = 0;
-  for (const name of names) {
+  for (const rawName of names) {
+    const name = await ensureExercise(rawName);
     await db.run(
       `INSERT INTO session_exercises
        (session_id, exercise_name, position, created_at)
@@ -1006,32 +1136,6 @@ export async function preloadTemplateExercises(sessionId, focus, log) {
    Build 1 — declarative migrations & one-time cleanup
    (all idempotent; safe to run on every boot)
 -------------------------------------------------- */
-
-/**
- * Applies the declarative MEASUREMENT_TYPES map to the exercises table.
- * Ensures each mapped name exists (INSERT OR IGNORE) then sets its
- * measurement_type. Replaces the old ad-hoc, name-exact hardcoded
- * corrections (e.g. the single "Bike" UPDATE) that missed real logged
- * variants like "Bike warm-up". Runs every boot — cheap and idempotent.
- */
-export async function applyMeasurementTypes(log) {
-  await initDb(log);
-  const now = Date.now();
-  const names = Object.keys(MEASUREMENT_TYPES);
-  for (const name of names) {
-    await db.run(
-      `INSERT OR IGNORE INTO exercises (name, created_at) VALUES (?, ?)`,
-      [name, now]
-    );
-    await db.run(
-      `UPDATE exercises SET measurement_type = ? WHERE name = ?`,
-      [MEASUREMENT_TYPES[name], name]
-    );
-  }
-  if (typeof log === "function") {
-    log(`✅ Applied measurement types (${names.length} mapped)`);
-  }
-}
 
 /**
  * One-time rename: "Seated incline press machine" →
@@ -1190,14 +1294,11 @@ export async function createCustomTemplate(name, exerciseNames = [], log) {
   for (const raw of exerciseNames) {
     const exName = String(raw || "").trim();
     if (!exName) continue;
-    await db.run(
-      `INSERT OR IGNORE INTO exercises (name, created_at) VALUES (?, ?)`,
-      [exName, now]
-    );
+    const canonical = await ensureExercise(exName);
     await db.run(
       `INSERT INTO custom_template_exercises (template_id, exercise_name, position)
        VALUES (?, ?, ?)`,
-      [templateId, exName, position++]
+      [templateId, canonical, position++]
     );
   }
 
@@ -1245,4 +1346,129 @@ export async function deleteCustomTemplate(templateId, log) {
   await initDb(log);
   await db.run(`DELETE FROM custom_templates WHERE id = ?`, [templateId]);
   if (typeof log === "function") log(`✅ Deleted custom template id=${templateId}`);
+}
+
+/* --------------------------------------------------
+   Revamp 2026-11 — settings, stats feed, backup/restore
+-------------------------------------------------- */
+
+export async function getSetting(key, fallback = null) {
+  await initDb();
+  const res = await db.query(`SELECT value FROM app_state WHERE key = ?`, [`setting:${key}`]);
+  const v = res.values?.[0]?.value;
+  return v === undefined || v === null ? fallback : v;
+}
+
+export async function setSetting(key, value) {
+  await initDb();
+  if (value === null || value === undefined || value === "") {
+    await db.run(`DELETE FROM app_state WHERE key = ?`, [`setting:${key}`]);
+    return;
+  }
+  await db.run(
+    `INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)`,
+    [`setting:${key}`, String(value)]
+  );
+}
+
+/**
+ * Every logged set with its exercise + session context, oldest first.
+ * The stats screens compute everything from this one list in memory
+ * (a few thousand rows), which keeps the SQL simple.
+ */
+export async function getAllSetRows() {
+  await initDb();
+  const res = await db.query(
+    `SELECT s.id, s.position, s.weight, s.weight_unit, s.reps, s.side,
+            s.duration_sec, s.distance_m,
+            se.id AS se_id, se.exercise_name,
+            sess.id AS session_id, sess.date, sess.focus
+     FROM sets s
+     JOIN session_exercises se ON s.session_exercise_id = se.id
+     JOIN sessions sess ON se.session_id = sess.id
+     ORDER BY sess.date ASC, sess.id ASC, se.position ASC, se.id ASC, s.position ASC, s.id ASC`
+  );
+  return res.values ?? [];
+}
+
+export async function listAllSessions() {
+  await initDb();
+  const res = await db.query(`SELECT * FROM sessions ORDER BY date ASC, id ASC`);
+  return res.values ?? [];
+}
+
+const BACKUP_TABLES = [
+  "sessions", "exercises", "session_exercises", "sets",
+  "custom_templates", "custom_template_exercises", "daily_metrics",
+];
+
+// Settings that must never leave the phone inside a backup file.
+const SECRET_KEYS = ["setting:gh_token"];
+
+/** Full dump of every table (all columns) for backup. */
+export async function dumpAll() {
+  await initDb();
+  const tables = {};
+  for (const t of BACKUP_TABLES) {
+    const r = await db.query(`SELECT * FROM ${t} ORDER BY id ASC`);
+    tables[t] = r.values ?? [];
+  }
+  const st = await db.query(`SELECT key, value FROM app_state`);
+  tables.app_state = (st.values ?? []).filter((r) => !SECRET_KEYS.includes(r.key));
+  return tables;
+}
+
+/**
+ * Replaces ALL data with the contents of a backup (tables as produced by
+ * dumpAll, or an older export with only the four core tables). Columns the
+ * backup doesn't have keep their defaults; unknown columns are ignored.
+ */
+export async function restoreAll(tables, log) {
+  await initDb();
+  if (!tables || !Array.isArray(tables.sessions) || !Array.isArray(tables.sets)) {
+    throw new Error("Not a Gym Log backup (no sessions/sets tables).");
+  }
+  await db.execute(`PRAGMA foreign_keys = OFF;`, false);
+  try {
+    for (const t of BACKUP_TABLES) {
+      if (!Array.isArray(tables[t])) continue;
+      const info = await db.query(`PRAGMA table_info(${t})`);
+      const known = new Set((info.values ?? []).map((c) => c.name));
+      await db.run(`DELETE FROM ${t}`);
+      for (const row of tables[t]) {
+        const cols = Object.keys(row).filter((c) => known.has(c) && row[c] !== undefined);
+        if (!cols.length) continue;
+        await db.run(
+          `INSERT INTO ${t} (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`,
+          cols.map((c) => row[c])
+        );
+      }
+    }
+    if (Array.isArray(tables.app_state)) {
+      for (const r of tables.app_state) {
+        if (!r.key || !String(r.key).startsWith("setting:")) continue;
+        await db.run(`INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)`, [r.key, r.value]);
+      }
+    }
+    // A restored session marked active is no longer "live" on this device.
+    await db.run(`DELETE FROM app_state WHERE key = 'active_session_id'`);
+    const act = await db.query(`SELECT id FROM sessions WHERE status = 'active' ORDER BY id DESC LIMIT 1`);
+    if (act.values?.[0]?.id) {
+      await db.run(
+        `INSERT OR REPLACE INTO app_state (key, value) VALUES ('active_session_id', ?)`,
+        [String(act.values[0].id)]
+      );
+    }
+  } finally {
+    await db.execute(`PRAGMA foreign_keys = ON;`, false);
+  }
+  // Catalogue rows for names that only exist in history, then defaults.
+  const missing = await db.query(
+    `SELECT DISTINCT se.exercise_name AS name FROM session_exercises se
+     LEFT JOIN exercises e ON e.name = se.exercise_name COLLATE NOCASE
+     WHERE e.id IS NULL`
+  );
+  for (const m of missing.values ?? []) await ensureExercise(m.name);
+  await applyExerciseDefaults(log);
+  if (typeof log === "function") log(`✅ Restore complete (${tables.sessions.length} sessions, ${tables.sets.length} sets)`);
 }
