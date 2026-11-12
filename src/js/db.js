@@ -304,6 +304,7 @@ export async function initDb(log) {
     await renameSeatedInclineOnce(log);
     await cleanupOrphansOnce(log);
     await coverHistoryNames();
+    await dedupeExerciseNames();
     await applyExerciseDefaults(log);
 
     if (typeof log === "function") log("✅ initDb OK");
@@ -438,6 +439,35 @@ async function coverHistoryNames() {
       [String(m.name).trim(), Date.now()]
     );
   }
+}
+
+// Folds exercises that differ only by capitals ("Dumbbell Hammer Curl" /
+// "Dumbbell hammer curl") into one: the oldest catalogue row wins, history
+// and templates are renamed to its spelling, the twins are removed. Only
+// names change — no sets are touched. Safe to run every boot.
+export const DEDUPE_SQL = [
+  `UPDATE session_exercises SET exercise_name = (
+     SELECT e.name FROM exercises e
+     WHERE e.name = session_exercises.exercise_name COLLATE NOCASE
+     ORDER BY e.id ASC LIMIT 1)
+   WHERE exercise_name != (
+     SELECT e.name FROM exercises e
+     WHERE e.name = session_exercises.exercise_name COLLATE NOCASE
+     ORDER BY e.id ASC LIMIT 1)`,
+  `UPDATE custom_template_exercises SET exercise_name = (
+     SELECT e.name FROM exercises e
+     WHERE e.name = custom_template_exercises.exercise_name COLLATE NOCASE
+     ORDER BY e.id ASC LIMIT 1)
+   WHERE exercise_name != (
+     SELECT e.name FROM exercises e
+     WHERE e.name = custom_template_exercises.exercise_name COLLATE NOCASE
+     ORDER BY e.id ASC LIMIT 1)`,
+  `DELETE FROM exercises WHERE id NOT IN (
+     SELECT MIN(id) FROM exercises GROUP BY name COLLATE NOCASE)`,
+];
+
+async function dedupeExerciseNames() {
+  for (const sql of DEDUPE_SQL) await db.run(sql);
 }
 
 /**
@@ -1469,6 +1499,7 @@ export async function restoreAll(tables, log) {
      WHERE e.id IS NULL`
   );
   for (const m of missing.values ?? []) await ensureExercise(m.name);
+  await dedupeExerciseNames();
   await applyExerciseDefaults(log);
   if (typeof log === "function") log(`✅ Restore complete (${tables.sessions.length} sessions, ${tables.sets.length} sets)`);
 }
